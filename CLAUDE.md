@@ -35,16 +35,21 @@ timestamp is earlier than its reference timestamp.
 - stderr: per file summary and total.
 - Exit codes: 0 = no backward steps, 1 = backward steps found,
   2 = a file could not be read, 3 = interrupted (Ctrl-C).
+  Note: 1 is currently also returned for usage errors (bad option, invalid
+  `-t`, no path given) and when no files are found.
 - All comments and user visible output in English.
 
 ## Usage
 
 ```
 ./monotonic_logs.py [-hVvmp][-t secs][-l log] path...
+  -h, --help            usage
+  -V, --version         print version and exit
+  -v, --verbose         verbose (cumulative: -v warning, -vv info, -vvv debug)
+  -l, --logfile=fname   log to this file (default and `-`: stderr)
   -m, --max             compare against highest timestamp seen so far
   -p, --prev            print the reference line before each hit
   -t, --threshold=secs  report only backward steps >= secs
-  -v                    verbose (cumulative: -vv info, -vvv debug)
 ```
 
 `path` may be a file, a glob pattern, or a directory (searched for
@@ -110,7 +115,7 @@ The script follows the author's standard skeleton. Keep it intact:
 - Do not touch `testdata/` contents that are referenced by tests unless the
   task requires it.
 - Commit after each working step with a concise English commit message.
-- Adjust this file according the changes, made in further iterations.
+- Update this file as later changes are made.
 
 ## Suggested next steps
 
