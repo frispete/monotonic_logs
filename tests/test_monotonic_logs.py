@@ -8,6 +8,9 @@
 
 import io
 import os
+import time
+import shutil
+import tempfile
 import unittest
 import contextlib
 
@@ -36,6 +39,28 @@ class GparMixin:
     def tearDown(self):
         for a, v in self._gpar.items():
             setattr(gpar, a, v)
+
+
+class CheckMixin(GparMixin):
+    """Run check_file() with captured output, warnings go to self.warnings"""
+
+    def check(self, name, **opts):
+        """Run check_file(), return (count, list of hits as (lineno, delta))"""
+        for k, v in opts.items():
+            setattr(gpar, k, v)
+        path = name if os.path.isabs(name) else data(name)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            count = ml.check_file(path)
+        self.warnings = err.getvalue().splitlines()
+        hits = []
+        for line in out.getvalue().splitlines():
+            if not line:
+                continue
+            loc, delta, _ = line.split('\t', 2)
+            self.assertTrue(loc.startswith(path + ':'), loc)
+            hits.append((int(loc[len(path) + 1:]), delta.strip()))
+        return count, hits
 
 
 class TestParseIso(unittest.TestCase):
@@ -117,24 +142,7 @@ class TestLogLines(unittest.TestCase):
         self.assertEqual(list(ml.log_lines(data('messages-empty.txt'))), [])
 
 
-class TestCheckFile(GparMixin, unittest.TestCase):
-
-    def check(self, name, **opts):
-        """Run check_file(), return (count, list of hits as (lineno, delta))"""
-        for k, v in opts.items():
-            setattr(gpar, k, v)
-        path = data(name)
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            count = ml.check_file(path)
-        hits = []
-        for line in out.getvalue().splitlines():
-            if not line:
-                continue
-            loc, delta, _ = line.split('\t', 2)
-            self.assertTrue(loc.startswith(path + ':'), loc)
-            hits.append((int(loc[len(path) + 1:]), delta.strip()))
-        return count, hits
+class TestCheckFile(CheckMixin, unittest.TestCase):
 
     def test_header_file(self):
         self.assertEqual(self.check('messages.txt'),
@@ -168,32 +176,89 @@ class TestCheckFile(GparMixin, unittest.TestCase):
                          (2, [(4, '-00:00:00.023456'), (7, '-00:31:00.500000')]))
 
     def test_syslog_year_change(self):
-        self.assertEqual(self.check('messages-syslog.txt'),
+        self.assertEqual(self.check('messages-20240103.txt'),
                          (1, [(5, '-00:00:01.000000')]))
+        self.assertEqual(self.warnings, [])
 
     def test_syslog_leap_day(self):
-        self.assertEqual(self.check('messages-leap.txt'),
+        self.assertEqual(self.check('messages-20240302.txt'),
                          (1, [(3, '-1d 00:00:00.000000')]))
 
-    @unittest.expectedFailure
     def test_syslog_leap_day_after_year_change(self):
-        # BUG: the year change moves the synthetic year from 2000 to 2001,
-        # where "Feb 29" is invalid, so that line is silently skipped.
-        self.assertEqual(self.check('messages-leap-yearchange.txt'),
+        self.assertEqual(self.check('messages-20240301.txt'),
                          (1, [(4, '-1d 00:00:00.000000')]))
+        self.assertEqual(self.warnings, [])
 
-    @unittest.expectedFailure
+    def test_syslog_invalid_leap_day(self):
+        self.assertEqual(self.check('messages-20230301.txt'), (0, []))
+        self.assertEqual(len(self.warnings), 1)
+        self.assertIn('messages-20230301.txt:2: warning: invalid date in year 2023 '
+                      'derived from file name', self.warnings[0])
+
     def test_mixed_formats(self):
-        # BUG: syslog timestamps carry the synthetic year 2000 and are
-        # compared with real ISO years, giving a bogus ~24 year step.
+        # syslog lines take the year from the following RFC3339 timestamp
         self.assertEqual(self.check('messages-mixed.txt'),
                          (1, [(3, '-01:00:05.000000')]))
+        self.assertEqual(self.warnings, [])
+
+    def test_mixed_inconsistent_year(self):
+        self.assertEqual(self.check('messages-20250115.txt'),
+                         (1, [(3, '-01:00:05.000000')]))
+        self.assertEqual(len(self.warnings), 1)
+        self.assertIn('messages-20250115.txt:2: warning: year 2025 derived from '
+                      'file name is inconsistent with the timestamp at line 1, '
+                      'using 2024', self.warnings[0])
 
     def test_monotonic(self):
         self.assertEqual(self.check('messages-monotonic.txt'), (0, []))
 
     def test_empty(self):
         self.assertEqual(self.check('messages-empty.txt'), (0, []))
+
+
+class TestFileTimeStamp(CheckMixin, unittest.TestCase):
+    """Year derived from the file time stamp, if the file name has no date"""
+
+    def setUp(self):
+        CheckMixin.setUp(self)
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+        CheckMixin.tearDown(self)
+
+    def write(self, mtime, *lines):
+        path = os.path.join(self.tmpdir, 'messages.txt')
+        with open(path, 'w') as fh:
+            fh.write('\n'.join(lines) + '\n')
+        t = time.mktime(mtime.timetuple())
+        os.utime(path, (t, t))
+        return path
+
+    def test_reference_date(self):
+        self.assertEqual(ml.reference_date('/x/messages-20240115.txt'),
+                         (datetime(2024, 1, 15), 'file name'))
+        path = self.write(datetime(2023, 6, 1, 12, 0), 'Jun  1 10:00:00 host1 x')
+        self.assertEqual(ml.reference_date(path),
+                         (datetime(2023, 6, 1, 12, 0), 'file time stamp'))
+
+    def test_leap_day(self):
+        lines = ('Feb 29 12:00:00 host1 leap day', 'Feb 28 12:00:00 host1 backward')
+        path = self.write(datetime(2024, 3, 1, 12, 0), *lines)
+        self.assertEqual(self.check(path),
+                         (1, [(2, '-1d 00:00:00.000000')]))
+        self.assertEqual(self.warnings, [])
+        path = self.write(datetime(2023, 3, 1, 12, 0), *lines)
+        self.assertEqual(self.check(path), (0, []))
+        self.assertIn('derived from file time stamp', self.warnings[0])
+
+    def test_last_entry_after_reference(self):
+        # Dec 31 is later than the Jan 1 reference, so it is from 2023
+        path = self.write(datetime(2024, 1, 1, 12, 0),
+                          'Feb 29 12:00:00 host1 leap day in 2024?',
+                          'Dec 31 23:00:00 host1 last entry')
+        self.assertEqual(self.check(path), (0, []))
+        self.assertIn('invalid date in year 2023', self.warnings[0])
 
 
 class TestCollectFiles(unittest.TestCase):
@@ -204,8 +269,8 @@ class TestCollectFiles(unittest.TestCase):
         self.assertEqual(files, sorted(files))
 
     def test_glob(self):
-        self.assertEqual(ml.collect_files([data('messages-leap*.txt')]),
-                         [data('messages-leap-yearchange.txt'), data('messages-leap.txt')])
+        self.assertEqual(ml.collect_files([data('messages-2024030*.txt')]),
+                         [data('messages-20240301.txt'), data('messages-20240302.txt')])
 
     def test_unmatched_is_kept(self):
         self.assertEqual(ml.collect_files(['/nonexistent/messages.txt']),

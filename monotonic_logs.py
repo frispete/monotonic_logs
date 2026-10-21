@@ -40,8 +40,13 @@ Exit code: 0 = no backward steps, 1 = backward steps found,
 Notes:
 Only the Python standard library is used, compatible with Python 3.6+ (SLES 15).
 Lines without a timestamp (continuation lines) are skipped.
-For traditional syslog timestamps, a step from December to January is
-treated as a year change, not as a backward step.
+Traditional syslog timestamps carry no year. Each run of them takes its
+year from the following RFC3339 timestamp, the last run from the date in
+the file name (messages-yyyymmdd.txt) or else the file time stamp, counting
+backwards. A step from December to January is treated as a year change, not
+as a backward step. A warning is printed, if the derived year is
+inconsistent with a preceding RFC3339 timestamp (whose year is used then),
+or results in an invalid date (e.g. Feb 29, the line is skipped then).
 
 Copyright:
 (c)2026 by %(author)s
@@ -53,7 +58,7 @@ License:
 # vim:set et ts=8 sw=4:
 #
 
-__version__ = '0.1'
+__version__ = '0.2'
 __author__ = 'Hans-Peter Jansen <hpj@urpla.net>'
 __license__ = 'GNU GPL v2 - see http://www.gnu.org/licenses/gpl2.txt for details'
 
@@ -105,8 +110,8 @@ MONTHS = {m: i for i, m in enumerate(
     ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'), 1)}
 
-# leap year, so that "Feb 29" can be parsed
-BSD_BASE_YEAR = 2000
+# date of rotated files, e.g. messages-20240115.txt
+FNAME_DATE_RE = re.compile(r'-((?:19|20)\d{6})(?!\d)')
 
 
 def exit(ret = 0, msg = None, usage = False):
@@ -186,38 +191,104 @@ def log_lines(path):
         yield i + 1, lines[i]
 
 
+def reference_date(path):
+    """Return (datetime, source) to derive the year of syslog timestamps from"""
+    m = FNAME_DATE_RE.search(os.path.basename(path))
+    if m:
+        try:
+            return datetime.strptime(m.group(1), '%Y%m%d'), 'file name'
+        except ValueError:
+            pass
+    return datetime.fromtimestamp(os.path.getmtime(path)), 'file time stamp'
+
+
+def assign_years(path, entries):
+    """Set the timestamp of traditional syslog entries [no, line, ts, fields]
+
+    Each run of syslog entries gets its year from the following RFC3339
+    timestamp, the last run from the file name or the file time stamp.
+    Years are counted backwards, December -> January is a year change.
+    If the last run is inconsistent with a preceding RFC3339 timestamp,
+    the year of the latter is used.
+    """
+    end = len(entries)
+    while end > 0:
+        if entries[end - 1][3] is None:
+            # RFC3339 entry
+            end -= 1
+            continue
+        start = end
+        while start > 0 and entries[start - 1][3] is not None:
+            start -= 1
+        run = entries[start:end]
+
+        last_mon, last_day = run[-1][3][:2]
+        if end < len(entries):
+            anchor = entries[end][2]
+            year, mon = anchor.year, anchor.month
+            source = 'the timestamp at line %d' % entries[end][0]
+        else:
+            ref, source = reference_date(path)
+            year, mon = ref.year, last_mon
+            if (last_mon, last_day) > (ref.month, ref.day):
+                year -= 1
+        log.debug('%s:%d-%d: year %d derived from %s',
+                  path, run[0][0], run[-1][0], year, source)
+
+        years = []
+        for e in reversed(run):
+            if e[3][0] == 12 and mon == 1:
+                year -= 1
+            mon = e[3][0]
+            years.append(year)
+        years.reverse()
+
+        if end == len(entries) and start > 0:
+            prev = entries[start - 1][2]
+            expected = prev.year
+            if prev.month == 12 and run[0][3][0] == 1:
+                expected += 1
+            if expected != years[0]:
+                stderr('%s:%d: warning: year %d derived from %s is inconsistent '
+                       'with the timestamp at line %d, using %d' % (
+                       path, run[0][0], years[0], source, entries[start - 1][0], expected))
+                years = [y + expected - years[0] for y in years]
+
+        for e, y in zip(run, years):
+            mon, day, h, mi, s = e[3]
+            try:
+                e[2] = datetime(y, mon, day, h, mi, s)
+            except ValueError:
+                stderr('%s:%d: warning: invalid date in year %d derived from %s, '
+                       'line skipped' % (path, e[0], y, source))
+        end = start
+
+
 def check_file(path):
     """Report backward timestamp steps in one file, return their count"""
-    prev_ts = prev_line = prev_no = None
-    bsd_year = BSD_BASE_YEAR
-    count = 0
-
+    entries = []
     for no, line in log_lines(path):
         m = ISO_RE.match(line)
         if m:
             try:
-                ts = parse_iso(m)
+                entries.append([no, line, parse_iso(m), None])
             except ValueError:
                 log.debug('%s:%d: invalid timestamp', path, no)
-                continue
-        else:
-            m = BSD_RE.match(line)
-            if not m or m.group(1) not in MONTHS:
-                # continuation line or no timestamp
-                continue
+            continue
+        m = BSD_RE.match(line)
+        if m and m.group(1) in MONTHS:
             mon, day, h, mi, s = m.groups()
-            try:
-                ts = datetime(bsd_year, MONTHS[mon], int(day), int(h), int(mi), int(s))
-                # December -> January is a year change, not a backward step
-                if prev_ts is not None and prev_ts.tzinfo is None and \
-                        prev_ts.month == 12 and ts.month == 1:
-                    bsd_year += 1
-                    ts = ts.replace(year = bsd_year)
-                    log.debug('%s:%d: year change assumed', path, no)
-            except ValueError:
-                log.debug('%s:%d: invalid timestamp', path, no)
-                continue
+            entries.append([no, line, None,
+                            (MONTHS[mon], int(day), int(h), int(mi), int(s))])
+        # else: continuation line or no timestamp
+    assign_years(path, entries)
 
+    prev_ts = prev_line = prev_no = None
+    count = 0
+    for no, line, ts, _ in entries:
+        if ts is None:
+            # invalid syslog date
+            continue
         if prev_ts is not None:
             a, b = comparable(ts, prev_ts)
             delta = a - b

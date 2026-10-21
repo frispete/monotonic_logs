@@ -24,7 +24,10 @@ timestamp is earlier than its reference timestamp.
   - RFC3339 / ISO8601 (rsyslog high precision):
     `2024-01-15T10:23:45.123456+01:00`
   - Traditional syslog: `Jan 15 10:23:45` (no year; a step from December to
-    January is a year change, not a backward step).
+    January is a year change, not a backward step). The year is taken from
+    the following RFC3339 timestamp, for the last run of syslog lines from
+    the file name date (`messages-yyyymmdd.txt`) or else the file mtime,
+    counting backwards.
 - Lines without a timestamp (continuation lines) are skipped.
 - Each file is checked independently.
 
@@ -32,7 +35,10 @@ timestamp is earlier than its reference timestamp.
 
 - stdout, one tab separated line per backward step:
   `<file>:<lineno>\t<negative delta>\t<log line>`
-- stderr: per file summary and total.
+- stderr: per file summary and total, and warnings
+  (`<file>:<lineno>: warning: ...`) if a derived syslog year is inconsistent
+  with a preceding RFC3339 timestamp (that year is used) or gives an invalid
+  date such as Feb 29 (line skipped). Warnings don't change the exit code.
 - Exit codes: 0 = no backward steps, 1 = backward steps found,
   2 = a file could not be read, 3 = interrupted (Ctrl-C).
   Note: 1 is currently also returned for usage errors (bad option, invalid
@@ -60,11 +66,16 @@ timestamp is earlier than its reference timestamp.
 `main()` (getopt → `gpar`) → `process()` → `collect_files()` → per file
 `check_file()` → `log_lines()` (section detection, reads whole file).
 
-- `check_file()` tries `ISO_RE` first, then `BSD_RE`. Syslog timestamps get
-  a synthetic year starting at `BSD_BASE_YEAR = 2000` (a leap year, so
-  `Feb 29` parses), incremented on Dec→Jan.
+- `check_file()` works in two passes: first it collects entries
+  `[no, line, ts, fields]` (`ISO_RE` tried before `BSD_RE`; syslog entries
+  have `ts = None` and the parsed `fields`), then `assign_years()` walks the
+  entries backwards and fills in syslog `ts` per run (anchor: following
+  RFC3339 entry, or `reference_date()` for the last run), then hits are
+  reported.
 - Mixed naive (syslog) and aware (ISO) timestamps are compared by stripping
   tzinfo in `comparable()`, so offsets are ignored in mixed comparisons.
+- Test files with only syslog timestamps need a dated name
+  (`messages-yyyymmdd.txt`), otherwise results depend on the checkout mtime.
 - `-m` works by *not* updating `prev_*` after a hit, so the reference stays
   the maximum; with `-p` the "previous" line printed is that maximum line.
 - Options are stored as class attributes on `gpar`, so they persist across
@@ -120,18 +131,10 @@ The script follows the author's standard skeleton. Keep it intact:
 
 ## Suggested next steps
 
-Done: synthetic test data, unit tests, Python 3.6 verification (3.6.15).
+Done: synthetic test data, unit tests, Python 3.6 verification (3.6.15),
+syslog year derivation (0.2).
 
-1. Fix known bugs (tests marked `@unittest.expectedFailure`; remove the
-   decorator once fixed):
-   - `Feb 29` after a syslog Dec→Jan year change is skipped as invalid,
-     because the synthetic year moves from 2000 to the non-leap 2001
-     (`messages-leap-yearchange.txt`).
-   - Mixed ISO/syslog files: syslog lines carry the synthetic year 2000 and
-     are compared against real ISO years, giving bogus ~24 year steps
-     (`messages-mixed.txt`). Syslog lines should probably inherit the year
-     (and offset?) of the last ISO timestamp.
-2. Possible enhancements (discuss before implementing):
+1. Possible enhancements (discuss before implementing):
    - Extend logic and parser to parse different sections in boot.txt
      - Starting with `# /usr/bin/journalctl --no-pager --boot` and
        `# {/usr,}/bin/dmesg -T`. Note the command path tolerance and the 
