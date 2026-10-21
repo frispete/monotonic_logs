@@ -1,0 +1,4 @@
+2024-01-15T10:00:00.000000+01:00 host1 iso
+Jan 15 10:00:05 host1 syslog, forward
+Jan 15 09:00:00 host1 syslog, backward 1:00:05
+2024-01-15T10:00:10.000000+01:00 host1 iso, forward

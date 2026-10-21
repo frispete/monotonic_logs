@@ -1,0 +1,4 @@
+Dec 31 12:00:00 host1 kernel: before year change
+Jan  1 12:00:00 host1 kernel: year change
+Feb 29 12:00:00 host1 kernel: leap day after year change
+Feb 28 12:00:00 host1 kernel: backward 1 day

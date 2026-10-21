@@ -1,0 +1,7 @@
+2024-01-15T10:00:00+02:00 host1 a: no fraction, +02:00 (08:00:00Z)
+2024-01-15T09:30:00.123+01:00 host1 b: smaller wall clock, but forward (08:30:00.123Z)
+2024-01-15T08:30:00.123456789Z host1 c: Z, 9 digits truncated to 6 (08:30:00.123456Z)
+2024-01-15T03:30:00.1-05:00 host1 d: backward 0.023456s (08:30:00.1Z)
+2024-02-30T08:30:00+00:00 host1 invalid date, skipped
+2024-01-15 08:31:00,5+0000 host1 e: space, comma, +0000 (08:31:00.5Z)
+2024-01-15T09:00:00+01:00 host1 f: backward 31:00.5 (08:00:00Z)

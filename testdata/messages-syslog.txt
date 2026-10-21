@@ -1,0 +1,8 @@
+Dec 31 23:59:58 host1 kernel: before year change
+Dec 31 23:59:59 host1 kernel: last second of the year
+Jan  1 00:00:00 host1 kernel: year change, not backward
+Jan  1 00:00:01 host1 kernel: forward
+Jan  1 00:00:00 host1 kernel: backward 1s
+	continuation line with tab
+Foo  1 00:00:00 host1 unknown month, skipped
+Jan  2 00:00:00 host1 kernel: forward

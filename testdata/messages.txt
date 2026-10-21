@@ -1,0 +1,20 @@
+#==[ Summary ]======================================#
+# synthetic supportconfig style test data
+2024-01-15T12:00:00.000000+01:00 host1 before any header, ignored
+#==[ Log File ]=====================================#
+# /var/log/warn
+2024-01-15T11:00:00.000000+01:00 host1 header not followed by messages, ignored
+#==[ Log File ]=====================================#
+# /var/log/messages
+2024-01-15T10:00:00.000000+01:00 host1 systemd[1]: Started Session 1.
+2024-01-15T10:00:01.000000+01:00 host1 kernel: reference
+    continuation line without timestamp
+2024-01-15T10:00:00.500000+01:00 host1 kernel: backward 0.5s
+2024-01-15T10:00:00.800000+01:00 host1 kernel: backward only against max
+2024-01-15T10:00:02.000000+01:00 host1 kernel: forward
+2024-01-15T09:59:00.000000+01:00 host1 chronyd[42]: backward 62s
+2024-01-15T10:00:03.000000+01:00 host1 kernel: forward again
+
+#==[ Configuration File ]===========================#
+# /etc/rsyslog.conf
+2024-01-15T08:00:00.000000+01:00 host1 after section end, ignored
