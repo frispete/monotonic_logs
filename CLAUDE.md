@@ -42,6 +42,8 @@ timestamp is earlier than its reference timestamp.
     exists or the derived year gives Feb 29 in a non-leap year. With `-y`,
     such a line is skipped with a warning.
 - Lines without a timestamp (continuation lines) are skipped.
+- Files ending in `.gz` / `.xz` are read via `gzip` / `lzma` (`OPENERS`,
+  by extension). Corrupt or truncated archives count as unreadable (exit 2).
 - Each file is checked independently.
 
 ## Output and exit codes
@@ -54,7 +56,8 @@ timestamp is earlier than its reference timestamp.
   (with `-y`) gives Feb 29 in a non-leap year (line skipped). Warnings don't
   change the exit code.
 - Exit codes: 0 = no backward steps, 1 = backward steps found,
-  2 = a file could not be read or its year could not be validated,
+  2 = a file could not be read (or decompressed) or its year could not be
+  validated,
   3 = interrupted (Ctrl-C).
   Note: 1 is currently also returned for usage errors (bad option, invalid
   `-t`, no path given) and when no files are found.
@@ -76,7 +79,8 @@ timestamp is earlier than its reference timestamp.
 ```
 
 `path` may be a file, a glob pattern, or a directory (searched for
-`messages*.txt` and `boot.txt`).
+`DIR_PATTERNS`: `messages*.txt`, `messages*.gz`, `messages*.xz`, `boot.txt`,
+`boot.txt.gz`, `boot.txt.xz`).
 
 ## Architecture (single file)
 
@@ -135,6 +139,8 @@ The script follows the author's standard skeleton. Keep it intact:
       sh -c 'zypper -q -n in python3 >/dev/null && python3 -m unittest discover -s tests -t . -v'
   ```
 - Test data lives in `testdata/` and must be synthetic or anonymized.
+  Compressed variants are created at runtime in a temp dir
+  (`TestCompressed`), don't commit binary test files.
   Never commit real supportconfig data (hostnames, IPs, user names).
 - Run the tests after every change; also check that the script still runs
   under Python 3.6 if an interpreter is available (e.g. a SLES 15 container).
@@ -151,10 +157,9 @@ The script follows the author's standard skeleton. Keep it intact:
 ## Suggested next steps
 
 Done: synthetic test data, unit tests, Python 3.6 verification (3.6.15),
-syslog year derivation (0.2), option `-y` (0.3), boot.txt sections (0.4).
+syslog year derivation (0.2), option `-y` (0.3), boot.txt sections (0.4), compressed input (0.5).
 
 1. Possible enhancements (discuss before implementing):
-   - Read compressed input (`.gz`, `.xz`) via `gzip` / `lzma`.
    - Option to summarize the largest backward step per file, it's line number
      and the number of backward steps
    - Option to extend the search in all files of a given directory, that match

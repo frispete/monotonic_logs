@@ -8,6 +8,8 @@
 
 import io
 import os
+import gzip
+import lzma
 import shutil
 import tempfile
 import unittest
@@ -368,6 +370,51 @@ class TestYear(CheckMixin, unittest.TestCase):
                       'timestamps derived from the timestamp at line 1', self.warnings[0])
 
 
+class TestCompressed(CheckMixin, unittest.TestCase):
+    """Compressed input, created from the plain test data"""
+    OPENERS = {'.gz': gzip.open, '.xz': lzma.open}
+
+    def setUp(self):
+        CheckMixin.setUp(self)
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+        CheckMixin.tearDown(self)
+
+    def compress(self, name, ext, dirname = None):
+        dirname = os.path.join(self.tmpdir, dirname or '')
+        os.makedirs(dirname, exist_ok = True)
+        path = os.path.join(dirname, os.path.basename(name) + ext)
+        with open(data(name), 'rb') as src, self.OPENERS[ext](path, 'wb') as dst:
+            dst.write(src.read())
+        return path
+
+    def test_same_results(self):
+        for name in ('messages.txt', 'messages-20240103.txt', 'messages-20240115.txt'):
+            expected = self.check(name)
+            for ext in self.OPENERS:
+                self.assertEqual(self.check(self.compress(name, ext)), expected,
+                                 name + ext)
+
+    def test_boot_txt_in_scc_directory(self):
+        for ext in self.OPENERS:
+            path = self.compress(BOOT, ext, os.path.dirname(BOOT))
+            self.assertEqual(self.check(path),
+                             (2, [(23, '-00:00:01.000000'), (39, '-00:00:01.000000')]))
+
+    def test_collect_files(self):
+        paths = [self.compress('messages-20240103.txt', '.gz'),
+                 self.compress('messages-20240115.txt', '.xz')]
+        raw = os.path.join(self.tmpdir, 'messages-20240116.xz')
+        shutil.copy(paths[1], raw)
+        paths.append(raw)
+        for name in ('boot.txt.gz', 'other.gz'):
+            open(os.path.join(self.tmpdir, name), 'w').close()
+        self.assertEqual(ml.collect_files([self.tmpdir]),
+                         sorted(paths + [os.path.join(self.tmpdir, 'boot.txt.gz')]))
+
+
 class TestCollectFiles(unittest.TestCase):
 
     def test_directory(self):
@@ -420,6 +467,18 @@ class TestMain(GparMixin, unittest.TestCase):
     def test_unreadable_wins_over_hits(self):
         with self.assertLogs(ml.log, 'ERROR'):
             self.assertEqual(self.main(data('messages.txt'), '/nonexistent/messages.txt'), 2)
+
+    def test_corrupt_compressed(self):
+        tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmpdir)
+        for name, content in (('messages-20240103.txt.gz', b'not gzip'),
+                              ('messages-20240103.txt.xz', b'not xz'),
+                              ('messages-20240104.txt.gz', gzip.compress(b'Jan  1 ')[:-8])):
+            path = os.path.join(tmpdir, name)
+            with open(path, 'wb') as fh:
+                fh.write(content)
+            with self.assertLogs(ml.log, 'ERROR'):
+                self.assertEqual(self.main(path), 2, name)
 
     def test_interrupted(self):
         with mock.patch.object(ml, 'check_file', side_effect = KeyboardInterrupt):

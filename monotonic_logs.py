@@ -17,7 +17,8 @@ Usage: %(appname)s [-hVvmp][-t secs][-y year][-l log] path...
                             required if it cannot be validated (see Notes)
 
        path may be a file, a glob pattern, or a directory
-       (directories are searched for messages*.txt and boot.txt)
+       (directories are searched for messages*.txt and boot.txt, and
+       messages*.gz, messages*.xz, boot.txt.gz, boot.txt.xz)
 
 Description:
 Files with supportconfig "#==[" headers are checked in these sections:
@@ -45,12 +46,14 @@ For each backward step, one tab separated line is printed to stdout:
 
 A per file summary and the total are printed to stderr.
 Exit code: 0 = no backward steps, 1 = backward steps found,
-2 = a file could not be read or its year could not be validated,
+2 = a file could not be read (or decompressed) or its year could not be
+validated,
 3 = interrupted.
 
 Notes:
 Only the Python standard library is used, compatible with Python 3.6+ (SLES 15).
 Lines without a timestamp (continuation lines) are skipped.
+Files ending in .gz or .xz are decompressed on the fly.
 Traditional syslog timestamps carry no year. The year of the first one in
 a section is taken from option -y, or else counted backwards from the first
 full (RFC3339 or dmesg -T) timestamp, or from the date in the file name
@@ -75,7 +78,7 @@ License:
 # vim:set et ts=8 sw=4:
 #
 
-__version__ = '0.4'
+__version__ = '0.5'
 __author__ = 'Hans-Peter Jansen <hpj@urpla.net>'
 __license__ = 'GNU GPL v2 - see http://www.gnu.org/licenses/gpl2.txt for details'
 
@@ -84,6 +87,8 @@ import os
 import re
 import sys
 import glob
+import gzip
+import lzma
 import getopt
 import calendar
 import logging
@@ -139,6 +144,13 @@ DMESG_RE = re.compile(r'^\[[A-Z][a-z]{2}\s+([A-Z][a-z]{2})\s+(\d{1,2})\s+'
 MONTHS = {m: i for i, m in enumerate(
     ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'), 1)}
+
+# file name patterns searched in directories
+DIR_PATTERNS = ('messages*.txt', 'messages*.gz', 'messages*.xz',
+                'boot.txt', 'boot.txt.gz', 'boot.txt.xz')
+
+# openers of compressed files by extension
+OPENERS = {'.gz': gzip.open, '.xz': lzma.open}
 
 # date of rotated files, e.g. messages-20240115.txt
 FNAME_DATE_RE = re.compile(r'-((?:19|20)\d{6})(?!\d)')
@@ -210,7 +222,8 @@ def log_sections(path):
     the sections listed in LOG_SECTIONS are returned, each ending at the
     next "#==[" header or the end of file.
     """
-    with open(path, 'r', encoding = 'utf-8', errors = 'replace') as fh:
+    opener = OPENERS.get(os.path.splitext(path)[1], open)
+    with opener(path, 'rt', encoding = 'utf-8', errors = 'replace') as fh:
         lines = fh.read().splitlines()
 
     if not any(SECTION_RE.match(line) for line in lines):
@@ -411,8 +424,10 @@ def collect_files(args):
     files = []
     for arg in args:
         if os.path.isdir(arg):
-            files.extend(sorted(glob.glob(os.path.join(arg, 'messages*.txt')) +
-                                glob.glob(os.path.join(arg, 'boot.txt'))))
+            found = set()
+            for pattern in DIR_PATTERNS:
+                found.update(glob.glob(os.path.join(arg, pattern)))
+            files.extend(sorted(found))
         else:
             matched = glob.glob(arg)
             files.extend(sorted(matched) if matched else [arg])
@@ -432,7 +447,8 @@ def process(args):
         log.info('processing %s', path)
         try:
             count = check_file(path)
-        except OSError as e:
+        except (OSError, EOFError, lzma.LZMAError) as e:
+            # EOFError, LZMAError: truncated or corrupt compressed file
             log.error('%s: %s', path, e)
             ret = 2
             continue
