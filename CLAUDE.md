@@ -120,15 +120,18 @@ The script follows the author's standard skeleton. Keep it intact:
 
 ## Suggested next steps
 
-1. Create synthetic test files in `testdata/` covering:
-   with/without `Log File` header, a following `#==[` section, RFC3339 with
-   different offsets and fraction lengths, traditional syslog incl. year
-   change and `Feb 29`, continuation lines, mixed formats, empty files.
-2. Write unit tests in `tests/` for `parse_iso()`, `fmt_delta()`,
-   `log_lines()`, `check_file()` (capture stdout) and the exit codes of
-   `main()`.
-3. Verify Python 3.6 compatibility.
-4. Possible enhancements (discuss before implementing):
+Done: synthetic test data, unit tests, Python 3.6 verification (3.6.15).
+
+1. Fix known bugs (tests marked `@unittest.expectedFailure`; remove the
+   decorator once fixed):
+   - `Feb 29` after a syslog Dec→Jan year change is skipped as invalid,
+     because the synthetic year moves from 2000 to the non-leap 2001
+     (`messages-leap-yearchange.txt`).
+   - Mixed ISO/syslog files: syslog lines carry the synthetic year 2000 and
+     are compared against real ISO years, giving bogus ~24 year steps
+     (`messages-mixed.txt`). Syslog lines should probably inherit the year
+     (and offset?) of the last ISO timestamp.
+2. Possible enhancements (discuss before implementing):
    - Extend logic and parser to parse different sections in boot.txt
      - Starting with `# /usr/bin/journalctl --no-pager --boot` and
        `# {/usr,}/bin/dmesg -T`. Note the command path tolerance and the 
