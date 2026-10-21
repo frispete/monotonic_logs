@@ -4,7 +4,7 @@ Synopsis:
 Check SUSE supportconfig messages*.txt and boot.txt files for non-monotonic
 timestamps.
 
-Usage: %(appname)s [-hVvmp][-t secs][-y year][-l log] path...
+Usage: %(appname)s [-hVvmps][-t secs][-y year][-l log] path...
        -h, --help           this message
        -V, --version        print version and exit
        -v, --verbose        verbose mode (cumulative)
@@ -12,6 +12,8 @@ Usage: %(appname)s [-hVvmp][-t secs][-y year][-l log] path...
        -m, --max            compare against the highest timestamp seen so far
                             instead of the previous line
        -p, --prev           print the reference line before each hit
+       -s, --summary        print only the largest backward step per file,
+                            with the number of backward steps
        -t, --threshold=secs report only backward steps >= secs (default: 0)
        -y, --year=year      year of the first traditional syslog timestamp,
                             required if it cannot be validated (see Notes)
@@ -43,6 +45,8 @@ Supported timestamp formats:
 
 For each backward step, one tab separated line is printed to stdout:
     <file>:<lineno>  <negative delta>  <log line>
+With -s, only the largest step of each file with backward steps:
+    <file>:<lineno>  <negative delta>  <number of backward steps>  <log line>
 
 A per file summary and the total are printed to stderr.
 Exit code: 0 = no backward steps, 1 = backward steps found,
@@ -78,7 +82,7 @@ License:
 # vim:set et ts=8 sw=4:
 #
 
-__version__ = '0.5'
+__version__ = '0.6'
 __author__ = 'Hans-Peter Jansen <hpj@urpla.net>'
 __license__ = 'GNU GPL v2 - see http://www.gnu.org/licenses/gpl2.txt for details'
 
@@ -111,6 +115,7 @@ class gpar:
     against_max = False
     show_prev = False
     threshold = timedelta(0)
+    summary = False
     year = None
 
 
@@ -358,16 +363,42 @@ def assign_years(path, entries):
                    ref_source, source, year))
 
 
+def print_hit(path, hit, extra = None):
+    """Print a backward step, optionally preceded by its reference line"""
+    no, delta, line, prev_no, prev_line = hit
+    fdelta = fmt_delta(delta)
+    if gpar.show_prev:
+        stdout('%s:%d\t%s\t%s%s' % (path, prev_no, ' ' * len(fdelta),
+                                    '\t' if extra is not None else '', prev_line))
+    if extra is not None:
+        line = '%s\t%s' % (extra, line)
+    stdout('%s:%d\t%s\t%s' % (path, no, fdelta, line))
+    if gpar.show_prev:
+        stdout()
+
+
 def check_file(path):
     """Report backward timestamp steps in one file, return their count"""
     sections = log_sections(path)
     if not sections:
         stderr('%s: warning: no log section found' % path)
-    return sum(check_section(path, section) for section in sections)
+    hits = []
+    for section in sections:
+        hits.extend(check_section(path, section))
+
+    if gpar.summary:
+        if hits:
+            # largest step, the first one on ties
+            print_hit(path, min(hits, key = lambda hit: hit[1]), len(hits))
+    else:
+        for hit in hits:
+            print_hit(path, hit)
+    return len(hits)
 
 
 def check_section(path, lines):
-    """Report backward timestamp steps in one log section, return their count"""
+    """Return the backward timestamp steps in one log section as list of
+    (lineno, delta, line, reference lineno, reference line)"""
     entries = []
     for no, line in lines:
         m = ISO_RE.match(line)
@@ -395,7 +426,7 @@ def check_section(path, lines):
     assign_years(path, entries)
 
     prev_ts = prev_line = prev_no = None
-    count = 0
+    hits = []
     for no, line, ts, _ in entries:
         if ts is None:
             # invalid syslog date
@@ -404,19 +435,13 @@ def check_section(path, lines):
             a, b = comparable(ts, prev_ts)
             delta = a - b
             if delta < timedelta(0) and -delta >= gpar.threshold:
-                count += 1
-                fdelta = fmt_delta(delta)
-                if gpar.show_prev:
-                    stdout('%s:%d\t%s\t%s' % (path, prev_no, ' ' * len(fdelta), prev_line))
-                stdout('%s:%d\t%s\t%s' % (path, no, fdelta, line))
-                if gpar.show_prev:
-                    stdout()
+                hits.append((no, delta, line, prev_no, prev_line))
                 if gpar.against_max:
                     # keep the maximum as reference
                     continue
         prev_ts, prev_line, prev_no = ts, line, no
 
-    return count
+    return hits
 
 
 def collect_files(args):
@@ -472,9 +497,9 @@ def main(argv = None):
         argv = sys.argv[1:]
 
     try:
-        optlist, args = getopt.getopt(argv, 'hVvl:mpt:y:',
+        optlist, args = getopt.getopt(argv, 'hVvl:mpst:y:',
             ('help', 'version', 'verbose', 'logfile=',
-             'max', 'prev', 'threshold=', 'year=')
+             'max', 'prev', 'summary', 'threshold=', 'year=')
         )
     except getopt.error as msg:
         exit(1, msg, True)
@@ -493,6 +518,8 @@ def main(argv = None):
             gpar.against_max = True
         elif opt in ('-p', '--prev'):
             gpar.show_prev = True
+        elif opt in ('-s', '--summary'):
+            gpar.summary = True
         elif opt in ('-t', '--threshold'):
             try:
                 gpar.threshold = timedelta(seconds = float(par))

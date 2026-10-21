@@ -36,7 +36,7 @@ def data(name):
 class GparMixin:
     """Save and restore the global parameters around each test"""
     GPAR_ATTRS = ('loglevel', 'logfile', 'against_max', 'show_prev', 'threshold',
-                  'year')
+                  'summary', 'year')
 
     def setUp(self):
         self._gpar = dict((a, getattr(gpar, a)) for a in self.GPAR_ATTRS)
@@ -202,6 +202,42 @@ class TestCheckFile(CheckMixin, unittest.TestCase):
                         prev)
         self.assertIn('messages.txt:12\t-00:00:00.500000\t', hit)
         self.assertEqual(blank, '')
+
+    def output(self, name, **opts):
+        for k, v in opts.items():
+            setattr(gpar, k, v)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            count = ml.check_file(data(name))
+        return count, out.getvalue().split('\n')[:-1]
+
+    def test_summary(self):
+        count, lines = self.output('messages.txt', summary = True)
+        self.assertEqual(count, 2)
+        self.assertEqual(lines, [data('messages.txt') + ':15\t-00:01:02.000000\t2\t'
+                                 '2024-01-15T09:59:00.000000+01:00 host1 chronyd[42]: '
+                                 'backward 62s'])
+
+    def test_summary_across_sections(self):
+        # equal steps in two sections: the first one wins
+        count, lines = self.output(BOOT, summary = True)
+        self.assertEqual(count, 2)
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith(data(BOOT) + ':23\t-00:00:01.000000\t2\t'))
+
+    def test_summary_with_prev_and_max(self):
+        count, lines = self.output('messages.txt', summary = True, show_prev = True,
+                                   against_max = True)
+        self.assertEqual(count, 3)
+        prev, hit, blank = lines
+        # with -m, the reference is the maximum before the step (line 14)
+        self.assertEqual(prev, data('messages.txt') + ':14\t' + ' ' * 16 + '\t\t'
+                         '2024-01-15T10:00:02.000000+01:00 host1 kernel: forward')
+        self.assertTrue(hit.startswith(data('messages.txt') + ':15\t-00:01:02.000000\t3\t'))
+        self.assertEqual(blank, '')
+
+    def test_summary_without_steps(self):
+        self.assertEqual(self.output('messages-monotonic.txt', summary = True), (0, []))
 
     def test_offsets_and_fractions(self):
         self.assertEqual(self.check('messages-20240115.txt'),
@@ -450,6 +486,11 @@ class TestMain(GparMixin, unittest.TestCase):
 
     def test_backward_steps(self):
         self.assertEqual(self.main(data('messages.txt')), 1)
+
+    def test_summary_option(self):
+        self.assertEqual(self.main('-s', data('messages.txt')), 1)
+        self.assertTrue(gpar.summary)
+        self.assertEqual(self.main('--summary', '-t', '3600', data('messages.txt')), 0)
 
     def test_threshold_filters_all(self):
         self.assertEqual(self.main('-t', '3600', data('messages.txt')), 0)

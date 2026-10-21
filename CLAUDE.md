@@ -49,7 +49,11 @@ timestamp is earlier than its reference timestamp.
 ## Output and exit codes
 
 - stdout, one tab separated line per backward step:
-  `<file>:<lineno>\t<negative delta>\t<log line>`
+  `<file>:<lineno>\t<negative delta>\t<log line>`; with `-s` only the largest
+  step per file (first on ties, files without steps print nothing):
+  `<file>:<lineno>\t<negative delta>\t<count>\t<log line>`. With `-p` the
+  reference line is printed before each printed step, followed by an empty
+  line.
 - stderr: per file summary and total, and warnings
   (`<file>:<lineno>: warning: ...`) if a derived syslog year is inconsistent
   with a full timestamp (that year is used) or the file/directory name date, or
@@ -66,13 +70,14 @@ timestamp is earlier than its reference timestamp.
 ## Usage
 
 ```
-./monotonic_logs.py [-hVvmp][-t secs][-y year][-l log] path...
+./monotonic_logs.py [-hVvmps][-t secs][-y year][-l log] path...
   -h, --help            usage
   -V, --version         print version and exit
   -v, --verbose         verbose (cumulative: -v warning, -vv info, -vvv debug)
   -l, --logfile=fname   log to this file (default and `-`: stderr)
   -m, --max             compare against highest timestamp seen so far
   -p, --prev            print the reference line before each hit
+  -s, --summary         print only the largest backward step per file
   -t, --threshold=secs  report only backward steps >= secs
   -y, --year=year       year of the first syslog timestamp (all files and
                         sections), required if it cannot be validated
@@ -92,8 +97,10 @@ per section `check_section()`.
   `[no, line, ts, fields]` (`ISO_RE`, then `DMESG_RE`, then `BSD_RE`; syslog
   entries have `ts = None` and the parsed `fields`), then `assign_years()` fills in
   syslog `ts` in one forward pass (start year from `start_year()`), then
-  hits are reported. `assign_years()` raises `YearError` before any output;
-  `process()` turns it into an error and exit code 2.
+  the hits are returned. `check_file()` collects the hits of all sections
+  and prints them (or the `-s` summary) via `print_hit()`, so a `YearError`
+  in any section prevents all output of that file; `process()` turns it
+  into an error and exit code 2.
 - Mixed naive (syslog) and aware (ISO) timestamps are compared by stripping
   tzinfo in `comparable()`, so offsets are ignored in mixed comparisons.
 - Test files with only syslog timestamps need a dated file name or an
@@ -104,7 +111,7 @@ per section `check_section()`.
 - Options are stored as class attributes on `gpar`, so they persist across
   `main()` calls. Tests must save and restore `gpar.against_max`,
   `show_prev`, `threshold`, `year` and `loglevel` (`GparMixin` in the tests).
-- `check_file()` writes hits directly via `stdout()`. Capture `sys.stdout`
+- `check_file()` writes hits via `stdout()`. Capture `sys.stdout`
   in tests; `stdout`/`stderr` look up `sys.stdout`/`sys.stderr` at call
   time, so `contextlib.redirect_stdout` works.
 
@@ -157,11 +164,9 @@ The script follows the author's standard skeleton. Keep it intact:
 ## Suggested next steps
 
 Done: synthetic test data, unit tests, Python 3.6 verification (3.6.15),
-syslog year derivation (0.2), option `-y` (0.3), boot.txt sections (0.4), compressed input (0.5).
+syslog year derivation (0.2), option `-y` (0.3), boot.txt sections (0.4), compressed input (0.5), summary option `-s` (0.6).
 
 1. Possible enhancements (discuss before implementing):
-   - Option to summarize the largest backward step per file, it's line number
-     and the number of backward steps
    - Option to extend the search in all files of a given directory, that match
      all supported timestamp patterns, prefixing at least 5 consecutive 
      lines. 
