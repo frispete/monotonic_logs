@@ -69,8 +69,17 @@ The script follows the author's standard skeleton. Keep it intact:
 
 ## Testing
 
-- Tests use `unittest` only (no pytest dependency):
-  `python3 -m unittest discover -s tests -v`
+- Tests use `unittest` only (no pytest dependency). Run from the repo root;
+  `-t .` puts the root on `sys.path` so tests can `import monotonic_logs`
+  (the script is not a package; `tests/` needs an `__init__.py`):
+  - all tests: `python3 -m unittest discover -s tests -t . -v`
+  - single test: `python3 -m unittest tests.test_monotonic_logs.TestParseIso.test_offset -v`
+- Python 3.6 check (the local interpreter is newer; podman is available,
+  the base image has no python3, hence the `zypper` step):
+  ```
+  podman run --rm -v "$PWD":/src:Z -w /src registry.suse.com/suse/sle15 \
+      sh -c 'zypper -q -n in python3 >/dev/null && python3 -m unittest discover -s tests -t . -v'
+  ```
 - Test data lives in `testdata/` and must be synthetic or anonymized.
   Never commit real supportconfig data (hostnames, IPs, user names).
 - Run the tests after every change; also check that the script still runs
