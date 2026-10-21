@@ -35,7 +35,7 @@ For each backward step, one tab separated line is printed to stdout:
 
 A per file summary and the total are printed to stderr.
 Exit code: 0 = no backward steps, 1 = backward steps found,
-2 = a file could not be read.
+2 = a file could not be read, 3 = interrupted.
 
 Notes:
 Only the Python standard library is used, compatible with Python 3.6+ (SLES 15).
@@ -316,7 +316,7 @@ def main(argv = None):
     try:
         return process(args)
     except KeyboardInterrupt:
-        return 3    # SIGQUIT
+        return 3    # interrupted (Ctrl-C)
 
 
 if __name__ == '__main__':
