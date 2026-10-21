@@ -4,8 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-`monotonic_logs.py` checks SUSE supportconfig `messages*.txt` files
-for non-monotonic (backward stepping) timestamps and reports every line whose
+`monotonic_logs.py` checks SUSE supportconfig `messages*.txt` and `boot.txt`
+files for non-monotonic (backward stepping) timestamps and reports every line whose
 timestamp is earlier than its reference timestamp.
 
 ## Requirements
@@ -14,21 +14,30 @@ timestamp is earlier than its reference timestamp.
 - Must stay compatible with Python 3.6 (SLES 15). Do not use
   `datetime.fromisoformat()`, f-strings with `=`, walrus operator,
   `dataclasses`, or other features newer than 3.6.
-- Log section detection:
-  - If a file contains the header line `#==[ Log File ]===...#` directly
-    followed by `# /var/log/messages`, ignore everything before it.
-  - The section ends at the next `#==[` header line.
-  - Files without this header (e.g. `messages-yyyymmdd.txt`) are processed
-    completely.
+- Log section detection (`LOG_SECTIONS`):
+  - Files with `#==[` headers are checked only in these sections, each
+    independently:
+    - `#==[ Log File ]===...#` followed by `# /var/log/messages`
+    - `#==[ Command ]===...#` followed by `# {/usr,}/bin/journalctl ...` with
+      `--no-pager` and any `--boot` form (`--boot 0`, `--boot=-1`), but not
+      `--disk-usage` / `--list-boot`
+    - `#==[ Command ]===...#` followed by `# {/usr,}/bin/dmesg ... -T`
+  - A section ends at the next `#==[` header line or EOF. A file with headers
+    but no such section gives a warning.
+  - Files without any `#==[` header (e.g. `messages-yyyymmdd.txt`) are
+    processed completely.
 - Supported timestamp formats:
   - RFC3339 / ISO8601 (rsyslog high precision):
     `2024-01-15T10:23:45.123456+01:00`
-  - Traditional syslog: `Jan 15 10:23:45` (no year; a step from December to
-    January is a year change, not a backward step). The year of the first
-    syslog line comes from `-y`, or else is counted backwards from the
-    first RFC3339 timestamp or the file name date (`messages-yyyymmdd.txt`);
-    from there years are counted forwards and resynced at each RFC3339
-    timestamp. The file mtime is deliberately not used (unreliable).
+  - `dmesg -T`: `[Mon Jan 15 10:23:45 2024]` (naive, weekday ignored).
+  - Traditional syslog / journalctl: `Jan 15 10:23:45` (no year; a step from
+    December to January is a year change, not a backward step). The year of
+    the first syslog line of a section comes from `-y`, or else is counted
+    backwards from the first full (RFC3339 or dmesg) timestamp, or from the
+    date in the file name (`messages-yyyymmdd.txt`) or supportconfig
+    directory name (`[prefix_]scc_<host>_yymmdd_hhmm`); from there years are
+    counted forwards and resynced at each full timestamp. The file mtime is
+    deliberately not used (unreliable).
   - Without `-y`, a file is skipped with an error (exit 2) if no year source
     exists or the derived year gives Feb 29 in a non-leap year. With `-y`,
     such a line is skipped with a warning.
@@ -41,7 +50,7 @@ timestamp is earlier than its reference timestamp.
   `<file>:<lineno>\t<negative delta>\t<log line>`
 - stderr: per file summary and total, and warnings
   (`<file>:<lineno>: warning: ...`) if a derived syslog year is inconsistent
-  with a RFC3339 timestamp (that year is used) or the file name date, or
+  with a full timestamp (that year is used) or the file/directory name date, or
   (with `-y`) gives Feb 29 in a non-leap year (line skipped). Warnings don't
   change the exit code.
 - Exit codes: 0 = no backward steps, 1 = backward steps found,
@@ -62,33 +71,35 @@ timestamp is earlier than its reference timestamp.
   -m, --max             compare against highest timestamp seen so far
   -p, --prev            print the reference line before each hit
   -t, --threshold=secs  report only backward steps >= secs
-  -y, --year=year       year of the first syslog timestamp (all files),
-                        required if it cannot be validated
+  -y, --year=year       year of the first syslog timestamp (all files and
+                        sections), required if it cannot be validated
 ```
 
 `path` may be a file, a glob pattern, or a directory (searched for
-`messages*.txt`).
+`messages*.txt` and `boot.txt`).
 
 ## Architecture (single file)
 
 `main()` (getopt → `gpar`) → `process()` → `collect_files()` → per file
-`check_file()` → `log_lines()` (section detection, reads whole file).
+`check_file()` → `log_sections()` (section detection, reads whole file) →
+per section `check_section()`.
 
-- `check_file()` works in two passes: first it collects entries
-  `[no, line, ts, fields]` (`ISO_RE` tried before `BSD_RE`; syslog entries
-  have `ts = None` and the parsed `fields`), then `assign_years()` fills in
+- `check_section()` works in two passes: first it collects entries
+  `[no, line, ts, fields]` (`ISO_RE`, then `DMESG_RE`, then `BSD_RE`; syslog
+  entries have `ts = None` and the parsed `fields`), then `assign_years()` fills in
   syslog `ts` in one forward pass (start year from `start_year()`), then
   hits are reported. `assign_years()` raises `YearError` before any output;
   `process()` turns it into an error and exit code 2.
 - Mixed naive (syslog) and aware (ISO) timestamps are compared by stripping
   tzinfo in `comparable()`, so offsets are ignored in mixed comparisons.
-- Test files with only syslog timestamps need a dated name
-  (`messages-yyyymmdd.txt`), otherwise results depend on the checkout mtime.
+- Test files with only syslog timestamps need a dated file name or an
+  `scc_*` directory (`testdata/scc_host1_240115_1200/boot.txt`), otherwise
+  they raise `YearError`.
 - `-m` works by *not* updating `prev_*` after a hit, so the reference stays
   the maximum; with `-p` the "previous" line printed is that maximum line.
 - Options are stored as class attributes on `gpar`, so they persist across
   `main()` calls. Tests must save and restore `gpar.against_max`,
-  `show_prev`, `threshold` and `loglevel` (e.g. in `setUp`/`tearDown`).
+  `show_prev`, `threshold`, `year` and `loglevel` (`GparMixin` in the tests).
 - `check_file()` writes hits directly via `stdout()`. Capture `sys.stdout`
   in tests; `stdout`/`stderr` look up `sys.stdout`/`sys.stderr` at call
   time, so `contextlib.redirect_stdout` works.
@@ -140,14 +151,9 @@ The script follows the author's standard skeleton. Keep it intact:
 ## Suggested next steps
 
 Done: synthetic test data, unit tests, Python 3.6 verification (3.6.15),
-syslog year derivation (0.2), option `-y` (0.3).
+syslog year derivation (0.2), option `-y` (0.3), boot.txt sections (0.4).
 
 1. Possible enhancements (discuss before implementing):
-   - Extend logic and parser to parse different sections in boot.txt
-     - Starting with `# /usr/bin/journalctl --no-pager --boot` and
-       `# {/usr,}/bin/dmesg -T`. Note the command path tolerance and the 
-       different timestamp format for `dmesg`. Output ends with file or 
-       another comment.
    - Read compressed input (`.gz`, `.xz`) via `gzip` / `lzma`.
    - Option to summarize the largest backward step per file, it's line number
      and the number of backward steps

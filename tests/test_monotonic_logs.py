@@ -24,6 +24,9 @@ TESTDATA = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__
                         'testdata')
 
 
+BOOT = os.path.join('scc_host1_240115_1200', 'boot.txt')
+
+
 def data(name):
     return os.path.join(TESTDATA, name)
 
@@ -124,10 +127,12 @@ class TestFmtDelta(unittest.TestCase):
         self.assertEqual(ml.fmt_delta(timedelta(0)), '+00:00:00.000000')
 
 
-class TestLogLines(unittest.TestCase):
+class TestLogSections(unittest.TestCase):
 
     def test_header_section(self):
-        lines = list(ml.log_lines(data('messages.txt')))
+        sections = ml.log_sections(data('messages.txt'))
+        self.assertEqual(len(sections), 1)
+        lines = sections[0]
         self.assertEqual(lines[0][0], 9)
         self.assertEqual(lines[-1][0], 17)
         text = '\n'.join(l for _, l in lines)
@@ -135,11 +140,36 @@ class TestLogLines(unittest.TestCase):
         self.assertNotIn('#==[', text)
 
     def test_no_header(self):
-        lines = list(ml.log_lines(data('messages-20240115.txt')))
-        self.assertEqual([n for n, _ in lines], list(range(1, 8)))
+        sections = ml.log_sections(data('messages-20240115.txt'))
+        self.assertEqual([[n for n, _ in sec] for sec in sections], [list(range(1, 8))])
 
     def test_empty(self):
-        self.assertEqual(list(ml.log_lines(data('messages-empty.txt'))), [])
+        self.assertEqual(ml.log_sections(data('messages-empty.txt')), [[]])
+
+    def test_boot_sections(self):
+        sections = ml.log_sections(data(BOOT))
+        # journalctl --boot 0, --boot=-1 and dmesg -T, the last up to EOF
+        self.assertEqual([(sec[0][0], sec[-1][0]) for sec in sections],
+                         [(21, 28), (31, 34), (37, 40)])
+
+    def test_section_header_variants(self):
+        def match(line):
+            return any(h.match('#==[ Command ]=======#') and c.match(line)
+                       for h, c in ml.LOG_SECTIONS[1:])
+        for line in ('# /usr/bin/journalctl --no-pager --boot 0',
+                     '# /usr/bin/journalctl --no-pager --boot=-1',
+                     '# /bin/journalctl --boot --no-pager',
+                     '# /bin/dmesg -T',
+                     '# /usr/bin/dmesg -T',
+                     '# /usr/bin/dmesg --color=never -T'):
+            self.assertTrue(match(line), line)
+        for line in ('# /usr/bin/journalctl --boot=0 --no-pager --disk-usage',
+                     '# /usr/bin/journalctl --no-pager --list-boot',
+                     '# /usr/bin/journalctl --boot 0',
+                     '# /usr/sbin/journalctl --no-pager --boot 0',
+                     '# /bin/dmesg',
+                     '# /bin/dmesg -t'):
+            self.assertFalse(match(line), line)
 
 
 class TestCheckFile(CheckMixin, unittest.TestCase):
@@ -209,6 +239,13 @@ class TestCheckFile(CheckMixin, unittest.TestCase):
                       'the file name is inconsistent with the timestamp at line 1, '
                       'using 2024', self.warnings[0])
 
+    def test_boot(self):
+        # sections are independent: no step between them, year change in
+        # the older boot, journalctl year from the supportconfig directory
+        self.assertEqual(self.check(BOOT),
+                         (2, [(23, '-00:00:01.000000'), (39, '-00:00:01.000000')]))
+        self.assertEqual(self.warnings, [])
+
     def test_monotonic(self):
         self.assertEqual(self.check('messages-monotonic.txt'), (0, []))
 
@@ -233,11 +270,43 @@ class TestYear(CheckMixin, unittest.TestCase):
             fh.write('\n'.join(lines) + '\n')
         return path
 
-    def test_fname_date(self):
-        self.assertEqual(ml.fname_date('/x/messages-20240115.txt'), datetime(2024, 1, 15))
-        self.assertIsNone(ml.fname_date('/x/messages.txt'))
-        self.assertIsNone(ml.fname_date('/x/messages-20241301.txt'))
-        self.assertIsNone(ml.fname_date('/x/messages-202401150.txt'))
+    def test_ref_date(self):
+        none = (None, None)
+        self.assertEqual(ml.ref_date('/x/messages-20240115.txt'),
+                         (datetime(2024, 1, 15), 'the file name'))
+        self.assertEqual(ml.ref_date('/x/messages.txt'), none)
+        self.assertEqual(ml.ref_date('/x/messages-20241301.txt'), none)
+        self.assertEqual(ml.ref_date('/x/messages-202401150.txt'), none)
+        scc = (datetime(2024, 1, 15), 'the supportconfig directory name')
+        self.assertEqual(ml.ref_date('/x/scc_host1_240115_1200/boot.txt'), scc)
+        self.assertEqual(ml.ref_date('/x/GCP_Files_scc_host1_240115_1200/boot.txt'), scc)
+        self.assertEqual(ml.ref_date('/x/notscc_host1_240115_1200/boot.txt'), none)
+        self.assertEqual(ml.ref_date('/x/scc_host1_241315_1200/boot.txt'), none)
+        # the file name date has precedence
+        self.assertEqual(ml.ref_date('/x/scc_host1_240115_1200/messages-20231231.txt'),
+                         (datetime(2023, 12, 31), 'the file name'))
+
+    def test_scc_directory_year(self):
+        scc = os.path.join(self.tmpdir, 'scc_host1_230301_1200')
+        os.mkdir(scc)
+        path = self.write(os.path.join(scc, 'messages.txt'), 'Feb 28 12:00:00 host1 a',
+                          'Feb 29 12:00:00 host1 b')
+        with self.assertRaises(ml.YearError) as cm:
+            self.check(path)
+        self.assertIn('Feb 29 in non-leap year 2023 derived from the supportconfig '
+                      'directory name', str(cm.exception))
+
+    def test_dmesg_anchor(self):
+        path = self.write('messages.txt', 'Dec 31 23:00:00 host1 a',
+                          '[Mon Jan  1 00:00:00 2024] b', 'Jan  1 00:00:01 host1 c')
+        self.assertEqual(self.check(path), (0, []))
+        self.assertEqual(self.warnings, [])
+
+    def test_no_log_section(self):
+        path = self.write('boot.txt', '#==[ Command ]=======#', '# /bin/uname -a',
+                          'Jan  1 00:00:00 host1 not a log line')
+        self.assertEqual(self.check(path), (0, []))
+        self.assertEqual(self.warnings, ['%s: warning: no log section found' % path])
 
     def test_no_year_source(self):
         path = self.write('messages.txt', 'Jan 15 10:00:00 host1 x')
@@ -309,6 +378,9 @@ class TestCollectFiles(unittest.TestCase):
     def test_glob(self):
         self.assertEqual(ml.collect_files([data('messages-2024030*.txt')]),
                          [data('messages-20240301.txt'), data('messages-20240302.txt')])
+
+    def test_boot_txt(self):
+        self.assertEqual(ml.collect_files([os.path.dirname(data(BOOT))]), [data(BOOT)])
 
     def test_unmatched_is_kept(self):
         self.assertEqual(ml.collect_files(['/nonexistent/messages.txt']),

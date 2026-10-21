@@ -1,0 +1,40 @@
+#==[ Command ]======================================#
+# /bin/uname -a
+Linux host1 5.14.21-150500.55.103-default #1 SMP PREEMPT_DYNAMIC x86_64 GNU/Linux
+
+#==[ Configuration File ]===========================#
+# /etc/default/grub
+# comment inside a section
+GRUB_TIMEOUT=8
+
+#==[ Command ]======================================#
+# /usr/bin/journalctl --boot=0 --no-pager --disk-usage
+Archived and active journals take up 1.2G in the file system.
+
+#==[ Command ]======================================#
+# /usr/bin/journalctl --no-pager --list-boot
+ -1 0123456789abcdef0123456789abcdef Mon 2024-01-08 08:00:00 CET—Mon 2024-01-15 09:00:00 CET
+  0 fedcba9876543210fedcba9876543210 Mon 2024-01-15 09:05:00 CET—Mon 2024-01-15 12:00:00 CET
+
+#==[ Command ]======================================#
+# /usr/bin/journalctl --no-pager --boot 0
+Jan 15 09:05:00 host1 kernel: Linux version 5.14.21
+Jan 15 09:05:01 host1 kernel: Command line: quiet
+Jan 15 09:05:00 host1 kernel: backward 1s
+    {
+      "json": "continuation line"
+    }
+Jan 15 11:59:00 host1 systemd[1]: Started Session 2.
+
+#==[ Command ]======================================#
+# /usr/bin/journalctl --no-pager --boot=-1
+Dec 31 23:59:00 host1 kernel: older boot, own section, year change follows
+Jan  1 00:01:00 host1 kernel: forward
+Jan  8 08:00:00 host1 kernel: forward
+
+#==[ Command ]======================================#
+# /bin/dmesg -T
+[Mon Jan 15 09:05:00 2024] Linux version 5.14.21
+[Mon Jan 15 09:05:02 2024] forward
+[Mon Jan 15 09:05:01 2024] backward 1s
+[Mon Jan 15 09:06:00 2024] forward

@@ -1,7 +1,8 @@
 #! /usr/bin/env python3
 """
 Synopsis:
-Check SUSE supportconfig messages*.txt files for non-monotonic timestamps.
+Check SUSE supportconfig messages*.txt and boot.txt files for non-monotonic
+timestamps.
 
 Usage: %(appname)s [-hVvmp][-t secs][-y year][-l log] path...
        -h, --help           this message
@@ -16,21 +17,28 @@ Usage: %(appname)s [-hVvmp][-t secs][-y year][-l log] path...
                             required if it cannot be validated (see Notes)
 
        path may be a file, a glob pattern, or a directory
-       (directories are searched for messages*.txt)
+       (directories are searched for messages*.txt and boot.txt)
 
 Description:
-If a file contains the header
+Files with supportconfig "#==[" headers are checked in these sections:
 
     #==[ Log File ]=====================================#
     # /var/log/messages
 
-everything before it is ignored, and the section ends at the next "#==["
-header. Files without this header (e.g. messages-yyyymmdd.txt) are
-processed completely.
+    #==[ Command ]======================================#
+    # /usr/bin/journalctl --no-pager --boot 0     (any --boot argument)
+
+    #==[ Command ]======================================#
+    # /bin/dmesg -T
+
+A section ends at the next "#==[" header, each section is checked
+independently. Files without any "#==[" header (e.g. messages-yyyymmdd.txt)
+are processed completely.
 
 Supported timestamp formats:
     RFC3339/ISO8601 (rsyslog high precision): 2024-01-15T10:23:45.123456+01:00
-    traditional syslog:                       Jan 15 10:23:45
+    traditional syslog, journalctl:           Jan 15 10:23:45
+    dmesg -T:                                 [Mon Jan 15 10:23:45 2024]
 
 For each backward step, one tab separated line is printed to stdout:
     <file>:<lineno>  <negative delta>  <log line>
@@ -43,16 +51,19 @@ Exit code: 0 = no backward steps, 1 = backward steps found,
 Notes:
 Only the Python standard library is used, compatible with Python 3.6+ (SLES 15).
 Lines without a timestamp (continuation lines) are skipped.
-Traditional syslog timestamps carry no year. The year of the first one is
-taken from option -y, or else counted backwards from the first RFC3339
-timestamp or the date in the file name (messages-yyyymmdd.txt). From there,
-years are counted forwards, a step from December to January is treated as
-a year change, not as a backward step. At each RFC3339 timestamp, the year
-is resynced. A warning is printed, if a derived year is inconsistent with
-a RFC3339 timestamp or the file name date.
+Traditional syslog timestamps carry no year. The year of the first one in
+a section is taken from option -y, or else counted backwards from the first
+full (RFC3339 or dmesg -T) timestamp, or from the date in the file name
+(messages-yyyymmdd.txt) or the supportconfig directory name
+(scc_<host>_yymmdd_hhmm). From there, years are counted forwards, a step
+from December to January is treated as a year change, not as a backward
+step. At each full timestamp, the year is resynced. A warning is printed,
+if a derived year is inconsistent with a full timestamp or the date of the
+file or directory name.
 Without -y, a file is skipped with an error, if no year source exists, or
 the derived year results in Feb 29 of a non-leap year. With -y, that line
-is skipped with a warning. The option applies to all given files.
+is skipped with a warning. The option applies to all given files and
+sections.
 
 Copyright:
 (c)2026 by %(author)s
@@ -64,7 +75,7 @@ License:
 # vim:set et ts=8 sw=4:
 #
 
-__version__ = '0.3'
+__version__ = '0.4'
 __author__ = 'Hans-Peter Jansen <hpj@urpla.net>'
 __license__ = 'GNU GPL v2 - see http://www.gnu.org/licenses/gpl2.txt for details'
 
@@ -104,9 +115,17 @@ stdout = lambda *msg: print(*msg, file = sys.stdout, flush = True)
 stderr = lambda *msg: print(*msg, file = sys.stderr, flush = True)
 
 
-HEADER_RE = re.compile(r'^#==\[\s*Log File\s*\]=+#?\s*$')
-LOGNAME_RE = re.compile(r'^#\s*/var/log/messages\b')
 SECTION_RE = re.compile(r'^#==\[')
+LOGFILE_RE = re.compile(r'^#==\[\s*Log File\s*\]=+#?\s*$')
+COMMAND_RE = re.compile(r'^#==\[\s*Command\s*\]=+#?\s*$')
+# (section header, following line) of log sections
+LOG_SECTIONS = (
+    (LOGFILE_RE, re.compile(r'^#\s*/var/log/messages\b')),
+    (COMMAND_RE, re.compile(r'^#\s*(?:/usr)?/bin/journalctl'
+                            r'(?=.*\s--no-pager\b)(?=.*\s--boot\b)'
+                            r'(?!.*\s--(?:disk-usage|list-boots?)\b)')),
+    (COMMAND_RE, re.compile(r'^#\s*(?:/usr)?/bin/dmesg\s(?:.*\s)?-T\b')),
+)
 
 ISO_RE = re.compile(
     r'^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})'
@@ -114,12 +133,17 @@ ISO_RE = re.compile(
     r'(Z|[+-]\d{2}:?\d{2})?'
 )
 BSD_RE = re.compile(r'^([A-Z][a-z]{2})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\b')
+# dmesg -T: [Thu Feb  5 23:03:22 2026]
+DMESG_RE = re.compile(r'^\[[A-Z][a-z]{2}\s+([A-Z][a-z]{2})\s+(\d{1,2})\s+'
+                      r'(\d{2}):(\d{2}):(\d{2})\s+(\d{4})\]')
 MONTHS = {m: i for i, m in enumerate(
     ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'), 1)}
 
 # date of rotated files, e.g. messages-20240115.txt
 FNAME_DATE_RE = re.compile(r'-((?:19|20)\d{6})(?!\d)')
+# collection date of supportconfig directories, e.g. scc_host1_240115_1200
+SCC_DATE_RE = re.compile(r'(?:^|_)scc_.+_(\d{6})_\d{4}$')
 
 
 def exit(ret = 0, msg = None, usage = False):
@@ -179,39 +203,54 @@ def fmt_delta(td):
     return sign + s
 
 
-def log_lines(path):
-    """Yield (lineno, line) of the log part of a file"""
+def log_sections(path):
+    """Return the log sections of a file as lists of (lineno, line)
+
+    A file without any "#==[" header is a single section. Otherwise, only
+    the sections listed in LOG_SECTIONS are returned, each ending at the
+    next "#==[" header or the end of file.
+    """
     with open(path, 'r', encoding = 'utf-8', errors = 'replace') as fh:
         lines = fh.read().splitlines()
 
-    start, end = 0, len(lines)
-    for i in range(len(lines) - 1):
-        if HEADER_RE.match(lines[i]) and LOGNAME_RE.match(lines[i + 1]):
-            start = i + 2
-            for j in range(start, len(lines)):
-                if SECTION_RE.match(lines[j]):
-                    end = j
-                    break
-            break
-    log.debug('%s: log section lines %d-%d', path, start + 1, end)
+    if not any(SECTION_RE.match(line) for line in lines):
+        return [list(enumerate(lines, 1))]
 
-    for i in range(start, end):
-        yield i + 1, lines[i]
+    sections = []
+    i = 0
+    while i < len(lines) - 1:
+        if not any(h.match(lines[i]) and c.match(lines[i + 1]) for h, c in LOG_SECTIONS):
+            i += 1
+            continue
+        start = end = i + 2
+        while end < len(lines) and not SECTION_RE.match(lines[end]):
+            end += 1
+        log.debug('%s: section "%s" lines %d-%d', path, lines[i + 1], start + 1, end)
+        sections.append([(n + 1, lines[n]) for n in range(start, end)])
+        i = end
+    return sections
 
 
 class YearError(Exception):
     """Year of traditional syslog timestamps cannot be validated"""
 
 
-def fname_date(path):
-    """Return the date of a rotated file from its name, or None"""
+def ref_date(path):
+    """Return (date, source) from the name of a rotated file or its
+    supportconfig directory, or (None, None)"""
     m = FNAME_DATE_RE.search(os.path.basename(path))
     if m:
         try:
-            return datetime.strptime(m.group(1), '%Y%m%d')
+            return datetime.strptime(m.group(1), '%Y%m%d'), 'the file name'
         except ValueError:
             pass
-    return None
+    m = SCC_DATE_RE.search(os.path.basename(os.path.dirname(os.path.abspath(path))))
+    if m:
+        try:
+            return datetime.strptime(m.group(1), '%y%m%d'), 'the supportconfig directory name'
+        except ValueError:
+            pass
+    return None, None
 
 
 def year_backwards(run, year, mon):
@@ -236,23 +275,25 @@ def start_year(path, entries):
         return gpar.year, 'option -y'
     for i, e in enumerate(entries):
         if e[3] is None:
-            # count backwards from the first RFC3339 timestamp
+            # count backwards from the first full timestamp
             return (year_backwards(entries[:i], e[2].year, e[2].month),
                     'the timestamp at line %d' % e[0])
-    ref = fname_date(path)
+    ref, source = ref_date(path)
     if ref is None:
-        raise YearError('no RFC3339 timestamp and no date in the file name')
+        raise YearError('no full timestamp and no date in the file or '
+                        'supportconfig directory name')
     return (year_backwards(entries, end_year(ref, entries[-1]), entries[-1][3][0]),
-            'the file name')
+            source)
 
 
 def assign_years(path, entries):
     """Set the timestamp of traditional syslog entries [no, line, ts, fields]
 
     The year of the first syslog entry is taken from option -y, or counted
-    backwards from the first RFC3339 timestamp, or from the date in the file
-    name. From there, years are counted forwards (December -> January is a
-    year change) and resynced at each RFC3339 timestamp.
+    backwards from the first full (RFC3339 or dmesg -T) timestamp, or from
+    the date in the file or supportconfig directory name. From there, years
+    are counted forwards (December -> January is a year change) and resynced
+    at each full timestamp.
     """
     if all(e[3] is None for e in entries):
         return
@@ -294,24 +335,41 @@ def assign_years(path, entries):
         except ValueError:
             log.debug('%s:%d: invalid timestamp', path, e[0])
 
-    # last run, resynced at a RFC3339 timestamp: check against the file name
+    # last run, resynced at a full timestamp: check against the reference date
     if gpar.year is None and run_start is not None and entries[-1][3] is not None:
-        ref = fname_date(path)
+        ref, ref_source = ref_date(path)
         if ref is not None and end_year(ref, entries[-1]) != year:
-            stderr('%s:%d: warning: year %d derived from the file name is '
+            stderr('%s:%d: warning: year %d derived from %s is '
                    'inconsistent with %s, using %d' % (
                    path, entries[run_start][0], end_year(ref, entries[-1]),
-                   source, year))
+                   ref_source, source, year))
 
 
 def check_file(path):
     """Report backward timestamp steps in one file, return their count"""
+    sections = log_sections(path)
+    if not sections:
+        stderr('%s: warning: no log section found' % path)
+    return sum(check_section(path, section) for section in sections)
+
+
+def check_section(path, lines):
+    """Report backward timestamp steps in one log section, return their count"""
     entries = []
-    for no, line in log_lines(path):
+    for no, line in lines:
         m = ISO_RE.match(line)
         if m:
             try:
                 entries.append([no, line, parse_iso(m), None])
+            except ValueError:
+                log.debug('%s:%d: invalid timestamp', path, no)
+            continue
+        m = DMESG_RE.match(line)
+        if m and m.group(1) in MONTHS:
+            mon, day, h, mi, s, y = m.groups()
+            try:
+                entries.append([no, line, datetime(int(y), MONTHS[mon], int(day),
+                                                   int(h), int(mi), int(s)), None])
             except ValueError:
                 log.debug('%s:%d: invalid timestamp', path, no)
             continue
@@ -353,7 +411,8 @@ def collect_files(args):
     files = []
     for arg in args:
         if os.path.isdir(arg):
-            files.extend(sorted(glob.glob(os.path.join(arg, 'messages*.txt'))))
+            files.extend(sorted(glob.glob(os.path.join(arg, 'messages*.txt')) +
+                                glob.glob(os.path.join(arg, 'boot.txt'))))
         else:
             matched = glob.glob(arg)
             files.extend(sorted(matched) if matched else [arg])
