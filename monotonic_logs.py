@@ -88,7 +88,7 @@ License:
 # vim:set et ts=8 sw=4:
 #
 
-__version__ = '0.7'
+__version__ = '0.8'
 __author__ = 'Hans-Peter Jansen <hpj@urpla.net>'
 __license__ = 'GNU GPL v2 - see http://www.gnu.org/licenses/gpl2.txt for details'
 
@@ -149,6 +149,8 @@ ISO_RE = re.compile(
     r'(?:[.,](\d+))?'
     r'(Z|[+-]\d{2}:?\d{2})?'
 )
+# tzinfo cache of parse_tz()
+TZINFOS = {'Z': timezone.utc}
 BSD_RE = re.compile(r'^([A-Z][a-z]{2})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\b')
 # dmesg -T: [Thu Feb  5 23:03:22 2026]
 DMESG_RE = re.compile(r'^\[[A-Z][a-z]{2}\s+([A-Z][a-z]{2})\s+(\d{1,2})\s+'
@@ -199,20 +201,23 @@ def setup_logging(logfile, loglevel):
     logging.basicConfig(**logconfig)
 
 
+def parse_tz(tz):
+    """Convert an ISO_RE offset (Z, +01:00, -0500) into a tzinfo, cached"""
+    tzinfo = TZINFOS.get(tz)
+    if tzinfo is None:
+        sign = -1 if tz[0] == '-' else 1
+        hhmm = tz[1:].replace(':', '')
+        tzinfo = TZINFOS[tz] = timezone(sign * timedelta(hours = int(hhmm[:2]),
+                                                         minutes = int(hhmm[2:])))
+    return tzinfo
+
+
 def parse_iso(m):
     """Convert an ISO_RE match into a datetime (Python 3.6 compatible)"""
     y, mo, d, h, mi, s, frac, tz = m.groups()
-    us = int((frac or '0')[:6].ljust(6, '0'))
-    tzinfo = None
-    if tz:
-        if tz == 'Z':
-            tzinfo = timezone.utc
-        else:
-            sign = -1 if tz[0] == '-' else 1
-            tz = tz[1:].replace(':', '')
-            tzinfo = timezone(sign * timedelta(hours = int(tz[:2]),
-                                               minutes = int(tz[2:])))
-    return datetime(int(y), int(mo), int(d), int(h), int(mi), int(s), us, tzinfo)
+    us = int(frac[:6].ljust(6, '0')) if frac else 0
+    return datetime(int(y), int(mo), int(d), int(h), int(mi), int(s), us,
+                    parse_tz(tz) if tz else None)
 
 
 def comparable(a, b):

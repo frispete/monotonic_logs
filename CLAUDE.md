@@ -172,8 +172,10 @@ The script follows the author's standard skeleton. Keep it intact:
 ## Suggested next steps
 
 Done: synthetic test data, unit tests, Python 3.6 verification (3.6.15),
-syslog year derivation (0.2), option `-y` (0.3), boot.txt sections (0.4), compressed input (0.5), summary option `-s` (0.6), option `-a` (0.7).
+syslog year derivation (0.2), option `-y` (0.3), boot.txt sections (0.4), compressed input (0.5), summary option `-s` (0.6), option `-a` (0.7), cached tzinfo in `parse_iso()` (0.8, ~30% faster).
 
-1. Performance: `parse_iso()` dominates the run time on large supportconfig
-   directories (a new `timezone` object per line).
+1. Performance: on a 771 MB supportconfig directory (~13 s), the remaining
+   time is mostly `datetime` construction in `parse_iso()` and the
+   `check_section()` loop. Comparing raw RFC3339 strings with equal offsets
+   would be faster, but more complex; discuss first.
 
