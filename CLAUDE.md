@@ -50,6 +50,25 @@ timestamp is earlier than its reference timestamp.
 `path` may be a file, a glob pattern, or a directory (searched for
 `messages*.txt`).
 
+## Architecture (single file)
+
+`main()` (getopt → `gpar`) → `process()` → `collect_files()` → per file
+`check_file()` → `log_lines()` (section detection, reads whole file).
+
+- `check_file()` tries `ISO_RE` first, then `BSD_RE`. Syslog timestamps get
+  a synthetic year starting at `BSD_BASE_YEAR = 2000` (a leap year, so
+  `Feb 29` parses), incremented on Dec→Jan.
+- Mixed naive (syslog) and aware (ISO) timestamps are compared by stripping
+  tzinfo in `comparable()`, so offsets are ignored in mixed comparisons.
+- `-m` works by *not* updating `prev_*` after a hit, so the reference stays
+  the maximum; with `-p` the "previous" line printed is that maximum line.
+- Options are stored as class attributes on `gpar`, so they persist across
+  `main()` calls. Tests must save and restore `gpar.against_max`,
+  `show_prev`, `threshold` and `loglevel` (e.g. in `setUp`/`tearDown`).
+- `check_file()` writes hits directly via `stdout()`. Capture `sys.stdout`
+  in tests; `stdout`/`stderr` look up `sys.stdout`/`sys.stderr` at call
+  time, so `contextlib.redirect_stdout` works.
+
 ## Code conventions
 
 The script follows the author's standard skeleton. Keep it intact:
