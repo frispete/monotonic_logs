@@ -3,7 +3,7 @@
 Synopsis:
 Check SUSE supportconfig messages*.txt files for non-monotonic timestamps.
 
-Usage: %(appname)s [-hVvmp][-t secs][-l log] path...
+Usage: %(appname)s [-hVvmp][-t secs][-y year][-l log] path...
        -h, --help           this message
        -V, --version        print version and exit
        -v, --verbose        verbose mode (cumulative)
@@ -12,6 +12,8 @@ Usage: %(appname)s [-hVvmp][-t secs][-l log] path...
                             instead of the previous line
        -p, --prev           print the reference line before each hit
        -t, --threshold=secs report only backward steps >= secs (default: 0)
+       -y, --year=year      year of the first traditional syslog timestamp,
+                            required if it cannot be validated (see Notes)
 
        path may be a file, a glob pattern, or a directory
        (directories are searched for messages*.txt)
@@ -35,18 +37,22 @@ For each backward step, one tab separated line is printed to stdout:
 
 A per file summary and the total are printed to stderr.
 Exit code: 0 = no backward steps, 1 = backward steps found,
-2 = a file could not be read, 3 = interrupted.
+2 = a file could not be read or its year could not be validated,
+3 = interrupted.
 
 Notes:
 Only the Python standard library is used, compatible with Python 3.6+ (SLES 15).
 Lines without a timestamp (continuation lines) are skipped.
-Traditional syslog timestamps carry no year. Each run of them takes its
-year from the following RFC3339 timestamp, the last run from the date in
-the file name (messages-yyyymmdd.txt) or else the file time stamp, counting
-backwards. A step from December to January is treated as a year change, not
-as a backward step. A warning is printed, if the derived year is
-inconsistent with a preceding RFC3339 timestamp (whose year is used then),
-or results in an invalid date (e.g. Feb 29, the line is skipped then).
+Traditional syslog timestamps carry no year. The year of the first one is
+taken from option -y, or else counted backwards from the first RFC3339
+timestamp or the date in the file name (messages-yyyymmdd.txt). From there,
+years are counted forwards, a step from December to January is treated as
+a year change, not as a backward step. At each RFC3339 timestamp, the year
+is resynced. A warning is printed, if a derived year is inconsistent with
+a RFC3339 timestamp or the file name date.
+Without -y, a file is skipped with an error, if no year source exists, or
+the derived year results in Feb 29 of a non-leap year. With -y, that line
+is skipped with a warning. The option applies to all given files.
 
 Copyright:
 (c)2026 by %(author)s
@@ -58,7 +64,7 @@ License:
 # vim:set et ts=8 sw=4:
 #
 
-__version__ = '0.2'
+__version__ = '0.3'
 __author__ = 'Hans-Peter Jansen <hpj@urpla.net>'
 __license__ = 'GNU GPL v2 - see http://www.gnu.org/licenses/gpl2.txt for details'
 
@@ -68,6 +74,7 @@ import re
 import sys
 import glob
 import getopt
+import calendar
 import logging
 
 from datetime import datetime, timedelta, timezone
@@ -88,6 +95,7 @@ class gpar:
     against_max = False
     show_prev = False
     threshold = timedelta(0)
+    year = None
 
 
 log = logging.getLogger(gpar.appname)
@@ -191,77 +199,109 @@ def log_lines(path):
         yield i + 1, lines[i]
 
 
-def reference_date(path):
-    """Return (datetime, source) to derive the year of syslog timestamps from"""
+class YearError(Exception):
+    """Year of traditional syslog timestamps cannot be validated"""
+
+
+def fname_date(path):
+    """Return the date of a rotated file from its name, or None"""
     m = FNAME_DATE_RE.search(os.path.basename(path))
     if m:
         try:
-            return datetime.strptime(m.group(1), '%Y%m%d'), 'file name'
+            return datetime.strptime(m.group(1), '%Y%m%d')
         except ValueError:
             pass
-    return datetime.fromtimestamp(os.path.getmtime(path)), 'file time stamp'
+    return None
+
+
+def year_backwards(run, year, mon):
+    """Count the year backwards over syslog entries, return the first one's"""
+    for e in reversed(run):
+        if e[3][0] == 12 and mon == 1:
+            year -= 1
+        mon = e[3][0]
+    return year
+
+
+def end_year(ref, e):
+    """Year of the last syslog entry e, rotated at date ref"""
+    if e[3][:2] > (ref.month, ref.day):
+        return ref.year - 1
+    return ref.year
+
+
+def start_year(path, entries):
+    """Return (year, source) of the first entry, which is a syslog one"""
+    if gpar.year is not None:
+        return gpar.year, 'option -y'
+    for i, e in enumerate(entries):
+        if e[3] is None:
+            # count backwards from the first RFC3339 timestamp
+            return (year_backwards(entries[:i], e[2].year, e[2].month),
+                    'the timestamp at line %d' % e[0])
+    ref = fname_date(path)
+    if ref is None:
+        raise YearError('no RFC3339 timestamp and no date in the file name')
+    return (year_backwards(entries, end_year(ref, entries[-1]), entries[-1][3][0]),
+            'the file name')
 
 
 def assign_years(path, entries):
     """Set the timestamp of traditional syslog entries [no, line, ts, fields]
 
-    Each run of syslog entries gets its year from the following RFC3339
-    timestamp, the last run from the file name or the file time stamp.
-    Years are counted backwards, December -> January is a year change.
-    If the last run is inconsistent with a preceding RFC3339 timestamp,
-    the year of the latter is used.
+    The year of the first syslog entry is taken from option -y, or counted
+    backwards from the first RFC3339 timestamp, or from the date in the file
+    name. From there, years are counted forwards (December -> January is a
+    year change) and resynced at each RFC3339 timestamp.
     """
-    end = len(entries)
-    while end > 0:
-        if entries[end - 1][3] is None:
-            # RFC3339 entry
-            end -= 1
+    if all(e[3] is None for e in entries):
+        return
+    year = mon = source = None
+    run_start = None
+    if entries[0][3] is not None:
+        year, source = start_year(path, entries)
+        mon = entries[0][3][0]
+        log.debug('%s: start year %d derived from %s', path, year, source)
+
+    for i, e in enumerate(entries):
+        if e[3] is None:
+            ts = e[2]
+            if i > 0 and entries[i - 1][3] is not None:
+                expected = year + (1 if mon == 12 and ts.month == 1 else 0)
+                if expected != ts.year:
+                    stderr('%s:%d: warning: year %d of the preceding syslog '
+                           'timestamps derived from %s is inconsistent with '
+                           'this timestamp' % (path, e[0], expected, source))
+            year, mon = ts.year, ts.month
+            source = 'the timestamp at line %d' % e[0]
             continue
-        start = end
-        while start > 0 and entries[start - 1][3] is not None:
-            start -= 1
-        run = entries[start:end]
 
-        last_mon, last_day = run[-1][3][:2]
-        if end < len(entries):
-            anchor = entries[end][2]
-            year, mon = anchor.year, anchor.month
-            source = 'the timestamp at line %d' % entries[end][0]
-        else:
-            ref, source = reference_date(path)
-            year, mon = ref.year, last_mon
-            if (last_mon, last_day) > (ref.month, ref.day):
-                year -= 1
-        log.debug('%s:%d-%d: year %d derived from %s',
-                  path, run[0][0], run[-1][0], year, source)
+        if i > 0 and entries[i - 1][3] is None:
+            run_start = i
+        m, day, h, mi, s = e[3]
+        if mon == 12 and m == 1:
+            year += 1
+        mon = m
+        if (m, day) == (2, 29) and not calendar.isleap(year):
+            if gpar.year is None:
+                raise YearError('line %d: Feb 29 in non-leap year %d derived from %s'
+                                % (e[0], year, source))
+            stderr('%s:%d: warning: Feb 29 in non-leap year %d derived from %s, '
+                   'line skipped' % (path, e[0], year, source))
+            continue
+        try:
+            e[2] = datetime(year, m, day, h, mi, s)
+        except ValueError:
+            log.debug('%s:%d: invalid timestamp', path, e[0])
 
-        years = []
-        for e in reversed(run):
-            if e[3][0] == 12 and mon == 1:
-                year -= 1
-            mon = e[3][0]
-            years.append(year)
-        years.reverse()
-
-        if end == len(entries) and start > 0:
-            prev = entries[start - 1][2]
-            expected = prev.year
-            if prev.month == 12 and run[0][3][0] == 1:
-                expected += 1
-            if expected != years[0]:
-                stderr('%s:%d: warning: year %d derived from %s is inconsistent '
-                       'with the timestamp at line %d, using %d' % (
-                       path, run[0][0], years[0], source, entries[start - 1][0], expected))
-                years = [y + expected - years[0] for y in years]
-
-        for e, y in zip(run, years):
-            mon, day, h, mi, s = e[3]
-            try:
-                e[2] = datetime(y, mon, day, h, mi, s)
-            except ValueError:
-                stderr('%s:%d: warning: invalid date in year %d derived from %s, '
-                       'line skipped' % (path, e[0], y, source))
-        end = start
+    # last run, resynced at a RFC3339 timestamp: check against the file name
+    if gpar.year is None and run_start is not None and entries[-1][3] is not None:
+        ref = fname_date(path)
+        if ref is not None and end_year(ref, entries[-1]) != year:
+            stderr('%s:%d: warning: year %d derived from the file name is '
+                   'inconsistent with %s, using %d' % (
+                   path, entries[run_start][0], end_year(ref, entries[-1]),
+                   source, year))
 
 
 def check_file(path):
@@ -337,6 +377,11 @@ def process(args):
             log.error('%s: %s', path, e)
             ret = 2
             continue
+        except YearError as e:
+            log.error('%s: year of syslog timestamps cannot be validated: %s, '
+                      'use -y to set the starting year', path, e)
+            ret = 2
+            continue
         stderr('%s: %d backward steps' % (path, count))
         total += count
 
@@ -352,9 +397,9 @@ def main(argv = None):
         argv = sys.argv[1:]
 
     try:
-        optlist, args = getopt.getopt(argv, 'hVvl:mpt:',
+        optlist, args = getopt.getopt(argv, 'hVvl:mpt:y:',
             ('help', 'version', 'verbose', 'logfile=',
-             'max', 'prev', 'threshold=')
+             'max', 'prev', 'threshold=', 'year=')
         )
     except getopt.error as msg:
         exit(1, msg, True)
@@ -378,6 +423,12 @@ def main(argv = None):
                 gpar.threshold = timedelta(seconds = float(par))
             except ValueError:
                 exit(1, 'invalid threshold: %s' % par, True)
+        elif opt in ('-y', '--year'):
+            try:
+                gpar.year = int(par)
+                datetime(gpar.year, 1, 1)
+            except ValueError:
+                exit(1, 'invalid year: %s' % par, True)
 
     if not args:
         exit(1, 'no path given', True)

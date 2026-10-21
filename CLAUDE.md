@@ -24,10 +24,14 @@ timestamp is earlier than its reference timestamp.
   - RFC3339 / ISO8601 (rsyslog high precision):
     `2024-01-15T10:23:45.123456+01:00`
   - Traditional syslog: `Jan 15 10:23:45` (no year; a step from December to
-    January is a year change, not a backward step). The year is taken from
-    the following RFC3339 timestamp, for the last run of syslog lines from
-    the file name date (`messages-yyyymmdd.txt`) or else the file mtime,
-    counting backwards.
+    January is a year change, not a backward step). The year of the first
+    syslog line comes from `-y`, or else is counted backwards from the
+    first RFC3339 timestamp or the file name date (`messages-yyyymmdd.txt`);
+    from there years are counted forwards and resynced at each RFC3339
+    timestamp. The file mtime is deliberately not used (unreliable).
+  - Without `-y`, a file is skipped with an error (exit 2) if no year source
+    exists or the derived year gives Feb 29 in a non-leap year. With `-y`,
+    such a line is skipped with a warning.
 - Lines without a timestamp (continuation lines) are skipped.
 - Each file is checked independently.
 
@@ -37,10 +41,12 @@ timestamp is earlier than its reference timestamp.
   `<file>:<lineno>\t<negative delta>\t<log line>`
 - stderr: per file summary and total, and warnings
   (`<file>:<lineno>: warning: ...`) if a derived syslog year is inconsistent
-  with a preceding RFC3339 timestamp (that year is used) or gives an invalid
-  date such as Feb 29 (line skipped). Warnings don't change the exit code.
+  with a RFC3339 timestamp (that year is used) or the file name date, or
+  (with `-y`) gives Feb 29 in a non-leap year (line skipped). Warnings don't
+  change the exit code.
 - Exit codes: 0 = no backward steps, 1 = backward steps found,
-  2 = a file could not be read, 3 = interrupted (Ctrl-C).
+  2 = a file could not be read or its year could not be validated,
+  3 = interrupted (Ctrl-C).
   Note: 1 is currently also returned for usage errors (bad option, invalid
   `-t`, no path given) and when no files are found.
 - All comments and user visible output in English.
@@ -48,7 +54,7 @@ timestamp is earlier than its reference timestamp.
 ## Usage
 
 ```
-./monotonic_logs.py [-hVvmp][-t secs][-l log] path...
+./monotonic_logs.py [-hVvmp][-t secs][-y year][-l log] path...
   -h, --help            usage
   -V, --version         print version and exit
   -v, --verbose         verbose (cumulative: -v warning, -vv info, -vvv debug)
@@ -56,6 +62,8 @@ timestamp is earlier than its reference timestamp.
   -m, --max             compare against highest timestamp seen so far
   -p, --prev            print the reference line before each hit
   -t, --threshold=secs  report only backward steps >= secs
+  -y, --year=year       year of the first syslog timestamp (all files),
+                        required if it cannot be validated
 ```
 
 `path` may be a file, a glob pattern, or a directory (searched for
@@ -68,10 +76,10 @@ timestamp is earlier than its reference timestamp.
 
 - `check_file()` works in two passes: first it collects entries
   `[no, line, ts, fields]` (`ISO_RE` tried before `BSD_RE`; syslog entries
-  have `ts = None` and the parsed `fields`), then `assign_years()` walks the
-  entries backwards and fills in syslog `ts` per run (anchor: following
-  RFC3339 entry, or `reference_date()` for the last run), then hits are
-  reported.
+  have `ts = None` and the parsed `fields`), then `assign_years()` fills in
+  syslog `ts` in one forward pass (start year from `start_year()`), then
+  hits are reported. `assign_years()` raises `YearError` before any output;
+  `process()` turns it into an error and exit code 2.
 - Mixed naive (syslog) and aware (ISO) timestamps are compared by stripping
   tzinfo in `comparable()`, so offsets are ignored in mixed comparisons.
 - Test files with only syslog timestamps need a dated name
@@ -132,7 +140,7 @@ The script follows the author's standard skeleton. Keep it intact:
 ## Suggested next steps
 
 Done: synthetic test data, unit tests, Python 3.6 verification (3.6.15),
-syslog year derivation (0.2).
+syslog year derivation (0.2), option `-y` (0.3).
 
 1. Possible enhancements (discuss before implementing):
    - Extend logic and parser to parse different sections in boot.txt

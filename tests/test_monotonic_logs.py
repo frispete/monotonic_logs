@@ -8,7 +8,6 @@
 
 import io
 import os
-import time
 import shutil
 import tempfile
 import unittest
@@ -31,7 +30,8 @@ def data(name):
 
 class GparMixin:
     """Save and restore the global parameters around each test"""
-    GPAR_ATTRS = ('loglevel', 'logfile', 'against_max', 'show_prev', 'threshold')
+    GPAR_ATTRS = ('loglevel', 'logfile', 'against_max', 'show_prev', 'threshold',
+                  'year')
 
     def setUp(self):
         self._gpar = dict((a, getattr(gpar, a)) for a in self.GPAR_ATTRS)
@@ -190,10 +190,10 @@ class TestCheckFile(CheckMixin, unittest.TestCase):
         self.assertEqual(self.warnings, [])
 
     def test_syslog_invalid_leap_day(self):
-        self.assertEqual(self.check('messages-20230301.txt'), (0, []))
-        self.assertEqual(len(self.warnings), 1)
-        self.assertIn('messages-20230301.txt:2: warning: invalid date in year 2023 '
-                      'derived from file name', self.warnings[0])
+        with self.assertRaises(ml.YearError) as cm:
+            self.check('messages-20230301.txt')
+        self.assertEqual(str(cm.exception), 'line 2: Feb 29 in non-leap year 2023 '
+                         'derived from the file name')
 
     def test_mixed_formats(self):
         # syslog lines take the year from the following RFC3339 timestamp
@@ -206,7 +206,7 @@ class TestCheckFile(CheckMixin, unittest.TestCase):
                          (1, [(3, '-01:00:05.000000')]))
         self.assertEqual(len(self.warnings), 1)
         self.assertIn('messages-20250115.txt:2: warning: year 2025 derived from '
-                      'file name is inconsistent with the timestamp at line 1, '
+                      'the file name is inconsistent with the timestamp at line 1, '
                       'using 2024', self.warnings[0])
 
     def test_monotonic(self):
@@ -216,8 +216,8 @@ class TestCheckFile(CheckMixin, unittest.TestCase):
         self.assertEqual(self.check('messages-empty.txt'), (0, []))
 
 
-class TestFileTimeStamp(CheckMixin, unittest.TestCase):
-    """Year derived from the file time stamp, if the file name has no date"""
+class TestYear(CheckMixin, unittest.TestCase):
+    """Year sources of traditional syslog timestamps and option -y"""
 
     def setUp(self):
         CheckMixin.setUp(self)
@@ -227,38 +227,76 @@ class TestFileTimeStamp(CheckMixin, unittest.TestCase):
         shutil.rmtree(self.tmpdir)
         CheckMixin.tearDown(self)
 
-    def write(self, mtime, *lines):
-        path = os.path.join(self.tmpdir, 'messages.txt')
+    def write(self, name, *lines):
+        path = os.path.join(self.tmpdir, name)
         with open(path, 'w') as fh:
             fh.write('\n'.join(lines) + '\n')
-        t = time.mktime(mtime.timetuple())
-        os.utime(path, (t, t))
         return path
 
-    def test_reference_date(self):
-        self.assertEqual(ml.reference_date('/x/messages-20240115.txt'),
-                         (datetime(2024, 1, 15), 'file name'))
-        path = self.write(datetime(2023, 6, 1, 12, 0), 'Jun  1 10:00:00 host1 x')
-        self.assertEqual(ml.reference_date(path),
-                         (datetime(2023, 6, 1, 12, 0), 'file time stamp'))
+    def test_fname_date(self):
+        self.assertEqual(ml.fname_date('/x/messages-20240115.txt'), datetime(2024, 1, 15))
+        self.assertIsNone(ml.fname_date('/x/messages.txt'))
+        self.assertIsNone(ml.fname_date('/x/messages-20241301.txt'))
+        self.assertIsNone(ml.fname_date('/x/messages-202401150.txt'))
 
-    def test_leap_day(self):
-        lines = ('Feb 29 12:00:00 host1 leap day', 'Feb 28 12:00:00 host1 backward')
-        path = self.write(datetime(2024, 3, 1, 12, 0), *lines)
-        self.assertEqual(self.check(path),
-                         (1, [(2, '-1d 00:00:00.000000')]))
-        self.assertEqual(self.warnings, [])
-        path = self.write(datetime(2023, 3, 1, 12, 0), *lines)
+    def test_no_year_source(self):
+        path = self.write('messages.txt', 'Jan 15 10:00:00 host1 x')
+        with self.assertRaises(ml.YearError):
+            self.check(path)
+
+    def test_iso_only_needs_no_year(self):
+        path = self.write('messages.txt', '2024-01-15T10:00:00+01:00 host1 x')
         self.assertEqual(self.check(path), (0, []))
-        self.assertIn('derived from file time stamp', self.warnings[0])
 
-    def test_last_entry_after_reference(self):
-        # Dec 31 is later than the Jan 1 reference, so it is from 2023
-        path = self.write(datetime(2024, 1, 1, 12, 0),
-                          'Feb 29 12:00:00 host1 leap day in 2024?',
+    def test_last_entry_after_file_name_date(self):
+        # Dec 31 is later than the Jan 1 rotation date, so it is from 2023
+        path = self.write('messages-20240101.txt',
+                          'Feb 29 12:00:00 host1 leap day in 2023?',
                           'Dec 31 23:00:00 host1 last entry')
+        with self.assertRaises(ml.YearError) as cm:
+            self.check(path)
+        self.assertIn('line 1: Feb 29 in non-leap year 2023', str(cm.exception))
+
+    def test_start_year(self):
+        # counted forwards from -y: Feb 29 is in 2024
+        lines = ('Dec 31 23:00:00 host1 a', 'Jan  1 01:00:00 host1 b',
+                 'Feb 29 12:00:00 host1 c')
+        path = self.write('messages.txt', *lines)
+        self.assertEqual(self.check(path, year = 2023), (0, []))
+        self.assertEqual(self.warnings, [])
+        self.assertEqual(self.check(path, year = 2024), (0, []))
+        self.assertEqual(len(self.warnings), 1)
+        self.assertIn('messages.txt:3: warning: Feb 29 in non-leap year 2025 '
+                      'derived from option -y, line skipped', self.warnings[0])
+
+    def test_year_overrides_file_name(self):
+        self.assertEqual(self.check('messages-20230301.txt', year = 2024), (0, []))
+        self.assertEqual(self.warnings, [])
+
+    def test_year_inconsistent_with_iso(self):
+        path = self.write('messages.txt', 'Jan 15 10:00:00 host1 a',
+                          '2024-01-15T10:00:01+01:00 host1 b')
+        self.assertEqual(self.check(path, year = 2023), (0, []))
+        self.assertEqual(len(self.warnings), 1)
+        self.assertIn('messages.txt:2: warning: year 2023 of the preceding syslog '
+                      'timestamps derived from option -y is inconsistent',
+                      self.warnings[0])
+
+    def test_resync_at_iso(self):
+        path = self.write('messages.txt', 'Jan  1 00:00:00 host1 a',
+                          '2024-12-31T23:00:00+01:00 host1 b',
+                          'Jan  1 00:30:00 host1 c, year change to 2025')
+        self.assertEqual(self.check(path, year = 2000), (0, []))
+        self.assertEqual(len(self.warnings), 1)
+
+    def test_middle_run_inconsistent(self):
+        path = self.write('messages.txt', '2024-01-15T10:00:00+01:00 host1 a',
+                          'Jan 15 10:00:05 host1 b',
+                          '2025-01-15T10:00:00+01:00 host1 c')
         self.assertEqual(self.check(path), (0, []))
-        self.assertIn('invalid date in year 2023', self.warnings[0])
+        self.assertEqual(len(self.warnings), 1)
+        self.assertIn('messages.txt:3: warning: year 2024 of the preceding syslog '
+                      'timestamps derived from the timestamp at line 1', self.warnings[0])
 
 
 class TestCollectFiles(unittest.TestCase):
@@ -298,7 +336,10 @@ class TestMain(GparMixin, unittest.TestCase):
         self.assertEqual(self.main('-t', '3600', data('messages.txt')), 0)
 
     def test_directory(self):
-        self.assertEqual(self.main(TESTDATA), 1)
+        # messages-20230301.txt cannot be validated without -y
+        with self.assertLogs(ml.log, 'ERROR'):
+            self.assertEqual(self.main(TESTDATA), 2)
+        self.assertEqual(self.main('-y', '2024', TESTDATA), 1)
 
     def test_unreadable(self):
         with self.assertLogs(ml.log, 'ERROR'):
@@ -316,6 +357,14 @@ class TestMain(GparMixin, unittest.TestCase):
         self.assertEqual(self.main(), 1)
         self.assertEqual(self.main('-x', data('messages.txt')), 1)
         self.assertEqual(self.main('-t', 'abc', data('messages.txt')), 1)
+        self.assertEqual(self.main('-y', 'abc', data('messages.txt')), 1)
+        self.assertEqual(self.main('-y', '0', data('messages.txt')), 1)
+
+    def test_year_not_validated(self):
+        with self.assertLogs(ml.log, 'ERROR') as cm:
+            self.assertEqual(self.main(data('messages-20230301.txt')), 2)
+        self.assertIn('use -y', cm.output[0])
+        self.assertEqual(self.main('--year=2024', data('messages-20230301.txt')), 0)
 
     def test_help_and_version(self):
         self.assertEqual(self.main('-h'), 0)
