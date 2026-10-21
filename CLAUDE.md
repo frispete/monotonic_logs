@@ -22,6 +22,8 @@ timestamp is earlier than its reference timestamp.
       `--no-pager` and any `--boot` form (`--boot 0`, `--boot=-1`), but not
       `--disk-usage` / `--list-boot`
     - `#==[ Command ]===...#` followed by `# {/usr,}/bin/dmesg ... -T`
+  - With `-a`, any other `#==[` section with a run of `MIN_RUN` (5)
+    consecutive timestamped lines is checked as well.
   - A section ends at the next `#==[` header line or EOF. A file with headers
     but no such section gives a warning.
   - Files without any `#==[` header (e.g. `messages-yyyymmdd.txt`) are
@@ -70,11 +72,13 @@ timestamp is earlier than its reference timestamp.
 ## Usage
 
 ```
-./monotonic_logs.py [-hVvmps][-t secs][-y year][-l log] path...
+./monotonic_logs.py [-hVvamps][-t secs][-y year][-l log] path...
   -h, --help            usage
   -V, --version         print version and exit
   -v, --verbose         verbose (cumulative: -v warning, -vv info, -vvv debug)
   -l, --logfile=fname   log to this file (default and `-`: stderr)
+  -a, --all             also search directories for all other files with
+                        logs, and check all sections with logs
   -m, --max             compare against highest timestamp seen so far
   -p, --prev            print the reference line before each hit
   -s, --summary         print only the largest backward step per file
@@ -85,7 +89,11 @@ timestamp is earlier than its reference timestamp.
 
 `path` may be a file, a glob pattern, or a directory (searched for
 `DIR_PATTERNS`: `messages*.txt`, `messages*.gz`, `messages*.xz`, `boot.txt`,
-`boot.txt.gz`, `boot.txt.xz`).
+`boot.txt.gz`, `boot.txt.xz`). With `-a`, also all other non-binary regular
+files (non-recursive) with at least 5 consecutive lines starting with a
+supported timestamp (`is_log_file()`, a pre-scan with the combined
+`LOG_LINE_RE`, which must stay in sync with `ISO_RE` / `DMESG_RE` /
+`BSD_RE`; `test_log_line_re` checks this).
 
 ## Architecture (single file)
 
@@ -164,10 +172,8 @@ The script follows the author's standard skeleton. Keep it intact:
 ## Suggested next steps
 
 Done: synthetic test data, unit tests, Python 3.6 verification (3.6.15),
-syslog year derivation (0.2), option `-y` (0.3), boot.txt sections (0.4), compressed input (0.5), summary option `-s` (0.6).
+syslog year derivation (0.2), option `-y` (0.3), boot.txt sections (0.4), compressed input (0.5), summary option `-s` (0.6), option `-a` (0.7).
 
-1. Possible enhancements (discuss before implementing):
-   - Option to extend the search in all files of a given directory, that match
-     all supported timestamp patterns, prefixing at least 5 consecutive 
-     lines. 
+1. Performance: `parse_iso()` dominates the run time on large supportconfig
+   directories (a new `timezone` object per line).
 

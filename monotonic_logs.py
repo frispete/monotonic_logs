@@ -4,11 +4,13 @@ Synopsis:
 Check SUSE supportconfig messages*.txt and boot.txt files for non-monotonic
 timestamps.
 
-Usage: %(appname)s [-hVvmps][-t secs][-y year][-l log] path...
+Usage: %(appname)s [-hVvamps][-t secs][-y year][-l log] path...
        -h, --help           this message
        -V, --version        print version and exit
        -v, --verbose        verbose mode (cumulative)
        -l, --logfile=fname  log to this file
+       -a, --all            search directories for all files with logs, and
+                            check all sections with logs (see Notes)
        -m, --max            compare against the highest timestamp seen so far
                             instead of the previous line
        -p, --prev           print the reference line before each hit
@@ -58,6 +60,10 @@ Notes:
 Only the Python standard library is used, compatible with Python 3.6+ (SLES 15).
 Lines without a timestamp (continuation lines) are skipped.
 Files ending in .gz or .xz are decompressed on the fly.
+With -a, directories are also searched (non-recursively) for all other
+non-binary files with at least 5 consecutive lines starting with a
+supported timestamp, and in files with "#==[" headers, all other sections
+with such lines are checked as well.
 Traditional syslog timestamps carry no year. The year of the first one in
 a section is taken from option -y, or else counted backwards from the first
 full (RFC3339 or dmesg -T) timestamp, or from the date in the file name
@@ -82,7 +88,7 @@ License:
 # vim:set et ts=8 sw=4:
 #
 
-__version__ = '0.6'
+__version__ = '0.7'
 __author__ = 'Hans-Peter Jansen <hpj@urpla.net>'
 __license__ = 'GNU GPL v2 - see http://www.gnu.org/licenses/gpl2.txt for details'
 
@@ -116,6 +122,7 @@ class gpar:
     show_prev = False
     threshold = timedelta(0)
     summary = False
+    all_files = False
     year = None
 
 
@@ -149,10 +156,18 @@ DMESG_RE = re.compile(r'^\[[A-Z][a-z]{2}\s+([A-Z][a-z]{2})\s+(\d{1,2})\s+'
 MONTHS = {m: i for i, m in enumerate(
     ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'), 1)}
+# fast check for any of ISO_RE, DMESG_RE, BSD_RE (with a valid month)
+LOG_LINE_RE = re.compile(
+    r'(?:\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}'
+    r'|\[[A-Z][a-z]{2}\s+(?:%(m)s)\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4}\]'
+    r'|(?:%(m)s)\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\b)' % dict(m = '|'.join(MONTHS)))
 
 # file name patterns searched in directories
 DIR_PATTERNS = ('messages*.txt', 'messages*.gz', 'messages*.xz',
                 'boot.txt', 'boot.txt.gz', 'boot.txt.xz')
+
+# minimum number of consecutive timestamped lines of a log (option -a)
+MIN_RUN = 5
 
 # openers of compressed files by extension
 OPENERS = {'.gz': gzip.open, '.xz': lzma.open}
@@ -220,15 +235,49 @@ def fmt_delta(td):
     return sign + s
 
 
+def open_text(path):
+    """Open a possibly compressed file for reading text"""
+    opener = OPENERS.get(os.path.splitext(path)[1], open)
+    return opener(path, 'rt', encoding = 'utf-8', errors = 'replace')
+
+
+def has_log_run(lines):
+    """True, if MIN_RUN consecutive lines start with a timestamp"""
+    run = 0
+    for line in lines:
+        if LOG_LINE_RE.match(line):
+            run += 1
+            if run >= MIN_RUN:
+                return True
+        else:
+            run = 0
+    return False
+
+
+def is_log_file(path):
+    """True, if path is a non-binary file with a run of timestamped lines"""
+    opener = OPENERS.get(os.path.splitext(path)[1], open)
+    try:
+        with opener(path, 'rb') as fh:
+            if b'\0' in fh.read(8192):
+                log.info('%s: binary file skipped', path)
+                return False
+        with open_text(path) as fh:
+            return has_log_run(fh)
+    except (OSError, EOFError, lzma.LZMAError) as e:
+        log.warning('%s: skipped: %s', path, e)
+        return False
+
+
 def log_sections(path):
     """Return the log sections of a file as lists of (lineno, line)
 
     A file without any "#==[" header is a single section. Otherwise, only
-    the sections listed in LOG_SECTIONS are returned, each ending at the
-    next "#==[" header or the end of file.
+    the sections listed in LOG_SECTIONS are returned, with option -a also
+    all other sections with a run of timestamped lines. Each section ends at
+    the next "#==[" header or the end of file.
     """
-    opener = OPENERS.get(os.path.splitext(path)[1], open)
-    with opener(path, 'rt', encoding = 'utf-8', errors = 'replace') as fh:
+    with open_text(path) as fh:
         lines = fh.read().splitlines()
 
     if not any(SECTION_RE.match(line) for line in lines):
@@ -236,15 +285,19 @@ def log_sections(path):
 
     sections = []
     i = 0
-    while i < len(lines) - 1:
-        if not any(h.match(lines[i]) and c.match(lines[i + 1]) for h, c in LOG_SECTIONS):
+    while i < len(lines):
+        if not SECTION_RE.match(lines[i]):
             i += 1
             continue
-        start = end = i + 2
+        known = i + 1 < len(lines) and \
+            any(h.match(lines[i]) and c.match(lines[i + 1]) for h, c in LOG_SECTIONS)
+        start = end = i + (2 if known else 1)
         while end < len(lines) and not SECTION_RE.match(lines[end]):
             end += 1
-        log.debug('%s: section "%s" lines %d-%d', path, lines[i + 1], start + 1, end)
-        sections.append([(n + 1, lines[n]) for n in range(start, end)])
+        if known or (gpar.all_files and has_log_run(lines[start:end])):
+            log.debug('%s: section "%s" lines %d-%d', path,
+                      lines[i + 1] if known else lines[i], start + 1, end)
+            sections.append([(n + 1, lines[n]) for n in range(start, end)])
         i = end
     return sections
 
@@ -452,6 +505,11 @@ def collect_files(args):
             found = set()
             for pattern in DIR_PATTERNS:
                 found.update(glob.glob(os.path.join(arg, pattern)))
+            if gpar.all_files:
+                for name in os.listdir(arg):
+                    path = os.path.join(arg, name)
+                    if path not in found and os.path.isfile(path) and is_log_file(path):
+                        found.add(path)
             files.extend(sorted(found))
         else:
             matched = glob.glob(arg)
@@ -497,8 +555,8 @@ def main(argv = None):
         argv = sys.argv[1:]
 
     try:
-        optlist, args = getopt.getopt(argv, 'hVvl:mpst:y:',
-            ('help', 'version', 'verbose', 'logfile=',
+        optlist, args = getopt.getopt(argv, 'hVvl:ampst:y:',
+            ('help', 'version', 'verbose', 'logfile=', 'all',
              'max', 'prev', 'summary', 'threshold=', 'year=')
         )
     except getopt.error as msg:
@@ -514,6 +572,8 @@ def main(argv = None):
                 gpar.loglevel -= 10
         elif opt in ('-l', '--logfile'):
             gpar.logfile = par
+        elif opt in ('-a', '--all'):
+            gpar.all_files = True
         elif opt in ('-m', '--max'):
             gpar.against_max = True
         elif opt in ('-p', '--prev'):

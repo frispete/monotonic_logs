@@ -36,7 +36,7 @@ def data(name):
 class GparMixin:
     """Save and restore the global parameters around each test"""
     GPAR_ATTRS = ('loglevel', 'logfile', 'against_max', 'show_prev', 'threshold',
-                  'summary', 'year')
+                  'summary', 'all_files', 'year')
 
     def setUp(self):
         self._gpar = dict((a, getattr(gpar, a)) for a in self.GPAR_ATTRS)
@@ -449,6 +449,90 @@ class TestCompressed(CheckMixin, unittest.TestCase):
             open(os.path.join(self.tmpdir, name), 'w').close()
         self.assertEqual(ml.collect_files([self.tmpdir]),
                          sorted(paths + [os.path.join(self.tmpdir, 'boot.txt.gz')]))
+
+
+class TestAllFiles(CheckMixin, unittest.TestCase):
+    """Option -a: search all files with logs and all sections with logs"""
+    ISO = ['2024-01-15T10:00:%02d+01:00 host1 line %d' % (i, i) for i in range(6)]
+    STEP = ISO[:3] + ['2024-01-15T09:00:00+01:00 host1 backward'] + ISO[3:]
+
+    def setUp(self):
+        CheckMixin.setUp(self)
+        self.tmpdir = tempfile.mkdtemp()
+        self.write('app.log', *self.STEP)
+        self.write('short.log', *(self.ISO[:4] + ['text'] + self.ISO[:4]))
+        self.write('notes.txt', 'just', 'text')
+        with open(os.path.join(self.tmpdir, 'data.bin'), 'wb') as fh:
+            fh.write(b'\0' + '\n'.join(self.ISO).encode())
+        with gzip.open(os.path.join(self.tmpdir, 'app.log.gz'), 'wt') as fh:
+            fh.write('\n'.join(self.ISO))
+        self.write('zypper.txt', '#==[ Log File ]=====#', '# /var/log/zypp/history',
+                   *(self.STEP + ['#==[ Command ]=====#', '# /bin/ls', '2024-01-01T00:00:00Z x']))
+        os.mkdir(os.path.join(self.tmpdir, 'subdir'))
+        self.write(os.path.join('subdir', 'app.log'), *self.STEP)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+        CheckMixin.tearDown(self)
+
+    def write(self, name, *lines):
+        path = os.path.join(self.tmpdir, name)
+        with open(path, 'w') as fh:
+            fh.write('\n'.join(lines) + '\n')
+        return path
+
+    def path(self, name):
+        return os.path.join(self.tmpdir, name)
+
+    def test_collect_files(self):
+        self.assertEqual(ml.collect_files([self.tmpdir]), [])
+        gpar.all_files = True
+        self.assertEqual(ml.collect_files([self.tmpdir]),
+                         [self.path(n) for n in ('app.log', 'app.log.gz', 'zypper.txt')])
+
+    def test_collect_files_keeps_patterns(self):
+        gpar.all_files = True
+        self.assertIn(data('messages-20240302.txt'), ml.collect_files([TESTDATA]))
+
+    def test_other_sections(self):
+        # without -a, the zypper history section is not a known log section
+        self.assertEqual(self.check(self.path('zypper.txt')), (0, []))
+        self.assertEqual(self.warnings, ['%s: warning: no log section found'
+                                         % self.path('zypper.txt')])
+        # with -a it is checked, the short Command section is not
+        self.assertEqual(self.check(self.path('zypper.txt'), all_files = True),
+                         (1, [(6, '-01:00:02.000000')]))
+
+    def test_known_sections_unchanged(self):
+        expected = self.check(BOOT)
+        self.assertEqual(self.check(BOOT, all_files = True), expected)
+
+    def test_has_log_run(self):
+        self.assertTrue(ml.has_log_run(self.ISO[:5]))
+        self.assertFalse(ml.has_log_run(self.ISO[:4]))
+        self.assertFalse(ml.has_log_run(self.ISO[:4] + ['x'] + self.ISO[:4]))
+        self.assertTrue(ml.has_log_run(['Jan  1 00:00:00 a'] * 3 +
+                                       ['[Mon Jan  1 00:00:00 2024] b'] * 2))
+        self.assertFalse(ml.has_log_run(['Foo  1 00:00:00 a'] * 5))
+
+    def test_log_line_re(self):
+        # LOG_LINE_RE must agree with the parsers on all test data lines
+        def parsed(line):
+            if ml.ISO_RE.match(line):
+                return True
+            m = ml.DMESG_RE.match(line) or ml.BSD_RE.match(line)
+            return bool(m) and m.group(1) in ml.MONTHS
+        names = [n for n in os.listdir(TESTDATA) if n.endswith('.txt')] + [BOOT]
+        for name in names:
+            with open(data(name)) as fh:
+                for line in fh:
+                    self.assertEqual(bool(ml.LOG_LINE_RE.match(line)), parsed(line), line)
+
+    def test_main(self):
+        with contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(ml.main(['-a', self.tmpdir]), 1)
+        self.assertEqual(err.getvalue().splitlines()[-1], 'total: 2 backward steps')
 
 
 class TestCollectFiles(unittest.TestCase):
