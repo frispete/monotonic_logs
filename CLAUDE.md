@@ -116,6 +116,7 @@ The script follows the author's standard skeleton. Keep it intact:
   task requires it.
 - Commit after each working step with a concise English commit message.
 - Update this file as later changes are made.
+- `tmp/` is ignored local scratch (older drafts), not part of the project.
 
 ## Suggested next steps
 
