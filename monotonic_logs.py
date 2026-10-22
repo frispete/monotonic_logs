@@ -4,13 +4,16 @@ Synopsis:
 Check SUSE supportconfig messages*.txt and boot.txt files for non-monotonic
 timestamps.
 
-Usage: %(appname)s [-hVvamprs][-t secs][-y year][-l log] path...
+Usage: %(appname)s [-hVvaLmprs][-t secs][-y year][-l log] path...
        -h, --help           this message
        -V, --version        print version and exit
        -v, --verbose        verbose mode (cumulative)
        -l, --logfile=fname  log to this file
        -a, --all            search directories for all files with logs, and
                             check all sections with logs (see Notes)
+       -L, --live           search directories of a live system: messages,
+                            warn, localmessages (and rotated), boot.msg,
+                            boot.omsg; path defaults to /var/log
        -m, --max            compare against the highest timestamp seen so far
                             instead of the previous line
        -p, --prev           print the reference line before each hit
@@ -51,6 +54,11 @@ Supported timestamp formats:
     RFC3339/ISO8601 (rsyslog high precision): 2024-01-15T10:23:45.123456+01:00
     traditional syslog, journalctl:           Jan 15 10:23:45
     dmesg -T:                                 [Mon Jan 15 10:23:45 2024]
+    time since boot (boot.msg, dmesg):        <6>[   14.028349]
+
+Times since boot are only compared with each other: if the type of
+timestamp changes between wall clock and time since boot, the comparison
+starts over.
 
 For each backward step, one tab separated line is printed to stdout:
     <file>:<lineno>  <negative delta>  <log line>
@@ -69,17 +77,17 @@ Notes:
 Only the Python standard library is used, compatible with Python 3.6+ (SLES 15).
 Lines without a timestamp (continuation lines) are skipped.
 Files ending in .gz or .xz are decompressed on the fly.
-With -a, directories are also searched for all other
-non-binary files with at least 5 consecutive lines starting with a
-supported timestamp, and in files with "#==[" headers, all other sections
-with such lines are checked as well.
+With -a, directories are also searched for all other non-binary files with
+at least 5 consecutive lines starting with a supported timestamp, and in
+files with "#==[" headers, all other sections with such lines are checked
+as well.
 Traditional syslog timestamps carry no year. The year of the first one in
 a section is taken from option -y, or else counted backwards from the first
 full (RFC3339 or dmesg -T) timestamp, or from the date in the file name
 (messages-yyyymmdd.txt) or the supportconfig directory name
-(scc_<host>_yymmdd_hhmm). From there, years are counted forwards, a step
-from December to January is treated as a year change, not as a backward
-step. At each full timestamp, the year is resynced. A warning is printed,
+(scc_<host>_yymmdd_hhmm), with -L also from the file time stamp. From
+there, years are counted forwards, a step from December to January is
+treated as a year change, not as a backward step. At each full timestamp, the year is resynced. A warning is printed,
 if a derived year is inconsistent with a full timestamp or the date of the
 file or directory name.
 Without -y, a file is skipped with an error, if no year source exists, or
@@ -97,7 +105,7 @@ License:
 # vim:set et ts=8 sw=4:
 #
 
-__version__ = '0.10'
+__version__ = '0.11'
 __author__ = 'Hans-Peter Jansen <hpj@urpla.net>'
 __license__ = 'GNU GPL v2 - see http://www.gnu.org/licenses/gpl2.txt for details'
 
@@ -133,6 +141,7 @@ class gpar:
     summary = False
     all_files = False
     recursive = False
+    live = False
     year = None
 
 
@@ -167,18 +176,25 @@ BSD_RE = re.compile(r'^([A-Z][a-z]{2})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\b')
 # dmesg -T: [Thu Feb  5 23:03:22 2026]
 DMESG_RE = re.compile(r'^\[[A-Z][a-z]{2}\s+([A-Z][a-z]{2})\s+(\d{1,2})\s+'
                       r'(\d{2}):(\d{2}):(\d{2})\s+(\d{4})\]')
+# kernel time since boot (boot.msg, dmesg): <6>[   14.028349] or [   14.028349]
+MONO_RE = re.compile(r'^(?:<\d+>)?\[\s*(\d+)\.(\d+)\]')
 MONTHS = {m: i for i, m in enumerate(
     ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'), 1)}
-# fast check for any of ISO_RE, DMESG_RE, BSD_RE (with a valid month)
+# fast check for any of ISO_RE, DMESG_RE, MONO_RE, BSD_RE (with a valid month)
 LOG_LINE_RE = re.compile(
     r'(?:\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}'
     r'|\[[A-Z][a-z]{2}\s+(?:%(m)s)\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4}\]'
+    r'|(?:<\d+>)?\[\s*\d+\.\d+\]'
     r'|(?:%(m)s)\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\b)' % dict(m = '|'.join(MONTHS)))
 
 # file name patterns searched in directories
 DIR_PATTERNS = ('messages*.txt', 'messages*.gz', 'messages*.xz',
                 'boot.txt', 'boot.txt.gz', 'boot.txt.xz')
+# file name patterns searched in directories of a live system (option -L)
+LIVE_PATTERNS = ('messages', 'messages-*', 'warn', 'warn-*',
+                 'localmessages', 'localmessages-*', 'boot.msg', 'boot.omsg')
+LIVE_DIR = '/var/log'
 
 # minimum number of consecutive timestamped lines of a log (option -a)
 MIN_RUN = 5
@@ -340,6 +356,9 @@ def ref_date(path):
             return datetime.strptime(m.group(1), '%y%m%d'), 'the supportconfig directory name'
         except ValueError:
             pass
+    if gpar.live:
+        # reliable on a live system only, not for copied data
+        return datetime.fromtimestamp(os.path.getmtime(path)), 'the file time stamp'
     return None, None
 
 
@@ -482,6 +501,14 @@ def check_section(path, lines):
             except ValueError:
                 log.debug('%s:%d: invalid timestamp', path, no)
             continue
+        m = MONO_RE.match(line)
+        if m:
+            secs, frac = m.groups()
+            # time since boot, a timedelta: never compared with wall clock
+            entries.append([no, line, timedelta(seconds = int(secs),
+                                                microseconds = int(frac[:6].ljust(6, '0'))),
+                            None])
+            continue
         m = DMESG_RE.match(line)
         if m and m.group(1) in MONTHS:
             mon, day, h, mi, s, y = m.groups()
@@ -497,7 +524,7 @@ def check_section(path, lines):
             entries.append([no, line, None,
                             (MONTHS[mon], int(day), int(h), int(mi), int(s))])
         # else: continuation line or no timestamp
-    assign_years(path, entries)
+    assign_years(path, [e for e in entries if not isinstance(e[2], timedelta)])
 
     prev_ts = prev_line = prev_no = None
     hits = []
@@ -505,9 +532,15 @@ def check_section(path, lines):
         if ts is None:
             # invalid syslog date
             continue
+        if prev_ts is not None and isinstance(ts, timedelta) != isinstance(prev_ts, timedelta):
+            # clock type changed (time since boot <-> wall clock): start over
+            prev_ts = None
         if prev_ts is not None:
-            a, b = comparable(ts, prev_ts)
-            delta = a - b
+            if isinstance(ts, timedelta):
+                delta = ts - prev_ts
+            else:
+                a, b = comparable(ts, prev_ts)
+                delta = a - b
             if delta < timedelta(0) and -delta >= gpar.threshold:
                 hits.append((no, delta, line, prev_no, prev_line))
                 if gpar.against_max:
@@ -521,7 +554,7 @@ def check_section(path, lines):
 def dir_files(dirname):
     """Return the sorted log files of one directory"""
     found = set()
-    for pattern in DIR_PATTERNS:
+    for pattern in LIVE_PATTERNS if gpar.live else DIR_PATTERNS:
         found.update(path for path in glob.glob(os.path.join(dirname, pattern))
                      if os.path.isfile(path))
     if gpar.all_files:
@@ -565,7 +598,8 @@ def process(args):
             count = check_file(path)
         except (OSError, EOFError, lzma.LZMAError) as e:
             # EOFError, LZMAError: truncated or corrupt compressed file
-            log.error('%s: %s', path, e)
+            log.error('%s: %s%s', path, e,
+                      ' (run as root?)' if isinstance(e, PermissionError) else '')
             ret = 2
             continue
         except YearError as e:
@@ -589,8 +623,8 @@ def main(argv = None):
         argv = sys.argv[1:]
 
     try:
-        optlist, args = getopt.getopt(argv, 'hVvl:amprst:y:',
-            ('help', 'version', 'verbose', 'logfile=', 'all',
+        optlist, args = getopt.getopt(argv, 'hVvl:aLmprst:y:',
+            ('help', 'version', 'verbose', 'logfile=', 'all', 'live',
              'max', 'prev', 'recursive', 'summary', 'threshold=', 'year=')
         )
     except getopt.error as msg:
@@ -608,6 +642,8 @@ def main(argv = None):
             gpar.logfile = par
         elif opt in ('-a', '--all'):
             gpar.all_files = True
+        elif opt in ('-L', '--live'):
+            gpar.live = True
         elif opt in ('-r', '--recursive'):
             gpar.recursive = True
         elif opt in ('-m', '--max'):
@@ -629,7 +665,9 @@ def main(argv = None):
                 exit(1, 'invalid year: %s' % par, True)
 
     if not args:
-        exit(1, 'no path given', True)
+        if not gpar.live:
+            exit(1, 'no path given', True)
+        args = [LIVE_DIR]
 
     setup_logging(gpar.logfile, gpar.loglevel)
 

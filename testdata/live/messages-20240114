@@ -1,0 +1,3 @@
+Jan 14 10:00:00 host1 kernel: rotated, year from the file name
+Jan 14 10:00:05 host1 kernel: forward
+Jan 14 10:00:03 host1 kernel: backward 2s

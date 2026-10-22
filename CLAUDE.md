@@ -35,6 +35,10 @@ timestamp is earlier than its reference timestamp.
   - RFC3339 / ISO8601 (rsyslog high precision):
     `2024-01-15T10:23:45.123456+01:00`
   - `dmesg -T`: `[Mon Jan 15 10:23:45 2024]` (naive, weekday ignored).
+  - Time since boot (`boot.msg`, plain `dmesg`, Xorg logs):
+    `<6>[   14.028349]` (`MONO_RE`, optional priority). Parsed as `timedelta`,
+    never part of the year logic and never compared with wall clock
+    timestamps: when the clock type changes, the comparison starts over.
   - Traditional syslog / journalctl: `Jan 15 10:23:45` (no year; a step from
     December to January is a year change, not a backward step). The year of
     the first syslog line of a section comes from `-y`, or else is counted
@@ -42,11 +46,18 @@ timestamp is earlier than its reference timestamp.
     date in the file name (`messages-yyyymmdd.txt`) or supportconfig
     directory name (`[prefix_]scc_<host>_yymmdd_hhmm[_<uuid>]`); from there years are
     counted forwards and resynced at each full timestamp. The file mtime is
-    deliberately not used (unreliable).
+    not used for copied data (unreliable), only with `-L`.
   - Without `-y`, a file is skipped with an error (exit 2) if no year source
     exists or the derived year gives Feb 29 in a non-leap year. With `-y`,
     such a line is skipped with a warning.
 - Lines without a timestamp (continuation lines) are skipped.
+- Live system (`-L`): directories are searched for `LIVE_PATTERNS`
+  (`messages`, `messages-*`, `warn`, `warn-*`, `localmessages`,
+  `localmessages-*`, `boot.msg`, `boot.omsg`) instead of `DIR_PATTERNS`,
+  `path` defaults to `LIVE_DIR` (`/var/log`). `-a` / `-r` work as usual.
+  These files have no `#==[` headers, so they are processed completely.
+  Only with `-L` the file mtime is a (last resort) year source. Permission
+  errors keep exit code 2, with the hint `(run as root?)`.
 - Files ending in `.gz` / `.xz` are read via `gzip` / `lzma` (`OPENERS`,
   by extension). Corrupt or truncated archives count as unreadable (exit 2).
 - Each file is checked independently.
@@ -77,13 +88,15 @@ timestamp is earlier than its reference timestamp.
 ## Usage
 
 ```
-./monotonic_logs.py [-hVvamprs][-t secs][-y year][-l log] path...
+./monotonic_logs.py [-hVvaLmprs][-t secs][-y year][-l log] path...
   -h, --help            usage
   -V, --version         print version and exit
   -v, --verbose         verbose (cumulative: -v warning, -vv info, -vvv debug)
   -l, --logfile=fname   log to this file (default and `-`: stderr)
   -a, --all             also search directories for all other files with
                         logs, and check all sections with logs
+  -L, --live            search a live system (LIVE_PATTERNS), path
+                        defaults to /var/log
   -m, --max             compare against highest timestamp seen so far
   -p, --prev            print the reference line before each hit
   -r, --recursive       search directories recursively (os.walk, sorted,
@@ -101,8 +114,8 @@ a directory (`dir_files()`, with `-r` for each directory of the tree; searched f
 `boot.txt.gz`, `boot.txt.xz`). With `-a`, also all other non-binary regular
 files with at least 5 consecutive lines starting with a
 supported timestamp (`is_log_file()`, a pre-scan with the combined
-`LOG_LINE_RE`, which must stay in sync with `ISO_RE` / `DMESG_RE` /
-`BSD_RE`; `test_log_line_re` checks this).
+`LOG_LINE_RE`, which must stay in sync with `ISO_RE` / `MONO_RE` /
+`DMESG_RE` / `BSD_RE`; `test_log_line_re` checks this).
 
 ## Architecture (single file)
 
@@ -111,7 +124,7 @@ supported timestamp (`is_log_file()`, a pre-scan with the combined
 per section `check_section()`.
 
 - `check_section()` works in two passes: first it collects entries
-  `[no, line, ts, fields]` (`ISO_RE`, then `DMESG_RE`, then `BSD_RE`; syslog
+  `[no, line, ts, fields]` (`ISO_RE`, then `MONO_RE`, then `DMESG_RE`, then `BSD_RE`; syslog
   entries have `ts = None` and the parsed `fields`), then `assign_years()` fills in
   syslog `ts` in one forward pass (start year from `start_year()`), then
   the hits are returned. `check_file()` collects the hits of all sections
@@ -183,7 +196,11 @@ The script follows the author's standard skeleton. Keep it intact:
 Done: synthetic test data, unit tests, Python 3.6 verification (3.6.15),
 syslog year derivation (0.2), option `-y` (0.3), boot.txt sections (0.4), compressed input (0.5), summary option `-s` (0.6), option `-a` (0.7), cached tzinfo in `parse_iso()` (0.8, ~30% faster), journalctl `--output`
 sections, quiet zero lines, cumulated delta in `-s` (0.9), option `-r`
-(0.10).
+(0.10), option `-L` for live systems and time since boot timestamps (0.11).
+
+1. Option `-j` (discuss first): check the systemd journal of a live system
+   via `journalctl --no-pager -o short-iso-precise` (subprocess, stdlib),
+   e.g. per boot (`--list-boots`), as separate sections.
 
 Further performance work (e.g. comparing raw RFC3339 strings) was considered
 and rejected as not worth the complexity (~13 s for a 771 MB supportconfig).

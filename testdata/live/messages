@@ -1,0 +1,4 @@
+2024-01-15T10:00:00.000000+01:00 host1 systemd[1]: Started Session 1.
+2024-01-15T10:00:01.000000+01:00 host1 kernel: reference
+2024-01-15T10:00:00.250000+01:00 host1 kernel: backward 0.75s
+2024-01-15T10:00:02.000000+01:00 host1 kernel: forward

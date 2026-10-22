@@ -8,6 +8,7 @@
 
 import io
 import os
+import time
 import gzip
 import lzma
 import shutil
@@ -27,6 +28,7 @@ TESTDATA = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 
 
 BOOT = os.path.join('scc_host1_240115_1200', 'boot.txt')
+LIVE = os.path.join(TESTDATA, 'live')
 BOOT_HITS = (3, [(23, '-00:00:01.000000'), (39, '-00:00:01.000000'),
                  (46, '-00:00:02.000000')])
 
@@ -38,7 +40,7 @@ def data(name):
 class GparMixin:
     """Save and restore the global parameters around each test"""
     GPAR_ATTRS = ('loglevel', 'logfile', 'against_max', 'show_prev', 'threshold',
-                  'summary', 'all_files', 'recursive', 'year')
+                  'summary', 'all_files', 'recursive', 'live', 'year')
 
     def setUp(self):
         self._gpar = dict((a, getattr(gpar, a)) for a in self.GPAR_ATTRS)
@@ -535,11 +537,12 @@ class TestAllFiles(CheckMixin, unittest.TestCase):
     def test_log_line_re(self):
         # LOG_LINE_RE must agree with the parsers on all test data lines
         def parsed(line):
-            if ml.ISO_RE.match(line):
+            if ml.ISO_RE.match(line) or ml.MONO_RE.match(line):
                 return True
             m = ml.DMESG_RE.match(line) or ml.BSD_RE.match(line)
             return bool(m) and m.group(1) in ml.MONTHS
-        names = [n for n in os.listdir(TESTDATA) if n.endswith('.txt')] + [BOOT]
+        names = [n for n in os.listdir(TESTDATA) if n.endswith('.txt')] + [BOOT] + \
+            [os.path.join('live', n) for n in os.listdir(LIVE) if n != 'sub']
         for name in names:
             with open(data(name)) as fh:
                 for line in fh:
@@ -613,6 +616,91 @@ class TestRecursive(GparMixin, unittest.TestCase):
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(ml.main(['-r', '-s', self.path('case')]), 1)
         self.assertTrue(out.getvalue().startswith(self.path(scc, 'messages.txt') + ':2\t'))
+
+
+class TestLive(CheckMixin, unittest.TestCase):
+    """Option -L: logs of a live system"""
+    FILES = ('boot.msg', 'boot.omsg', 'localmessages', 'messages',
+             'messages-20240114', 'warn')
+
+    def live(self, *names):
+        return os.path.join(LIVE, *names)
+
+    def test_collect_files(self):
+        self.assertEqual(ml.collect_files([LIVE]), [])
+        gpar.live = True
+        self.assertEqual(ml.collect_files([LIVE]), [self.live(n) for n in self.FILES])
+        gpar.all_files = True
+        self.assertIn(self.live('other.log'), ml.collect_files([LIVE]))
+        self.assertNotIn(self.live('sub', 'messages'), ml.collect_files([LIVE]))
+        gpar.recursive = True
+        self.assertEqual(ml.collect_files([LIVE])[-1], self.live('sub', 'messages'))
+
+    def test_boot_msg(self):
+        # continuation line skipped, systemd line with priority <30>
+        self.assertEqual(self.check(self.live('boot.msg')), (1, [(5, '-00:00:00.000100')]))
+
+    def test_rotated_year_from_file_name(self):
+        self.assertEqual(self.check(self.live('messages-20240114')),
+                         (1, [(3, '-00:00:02.000000')]))
+
+    def test_mono_re(self):
+        for line, secs in (('<6>[   14.028349] [    T713] x', 14.028349),
+                           ('[    0.000000] x', 0.0), ('[123456.5] x', 123456.5)):
+            m = ml.MONO_RE.match(line)
+            self.assertIsNotNone(m, line)
+            self.assertAlmostEqual(float('%s.%s' % m.groups()), secs)
+        for line in ('<6> [ 1.0] x', '[ 1] x', '[Mon Jan 15 10:00:00 2024] x'):
+            self.assertIsNone(ml.MONO_RE.match(line), line)
+
+    def test_clock_change_starts_over(self):
+        tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmpdir)
+        path = os.path.join(tmpdir, 'mixed.log')
+        with open(path, 'w') as fh:
+            fh.write('[   10.000000] boot\n'
+                     '2024-01-15T10:00:00+01:00 host1 wall clock\n'
+                     '[    5.000000] not compared with the wall clock\n'
+                     '[    4.000000] backward 1s\n'
+                     'Jan 15 09:00:00 host1 syslog, year from the timestamp at line 2\n')
+        self.assertEqual(self.check(path), (1, [(4, '-00:00:01.000000')]))
+        self.assertEqual(self.warnings, [])
+
+    def test_mtime_year(self):
+        tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmpdir)
+        path = os.path.join(tmpdir, 'warn')
+        with open(path, 'w') as fh:
+            fh.write('Feb 29 12:00:00 host1 a\nFeb 28 12:00:00 host1 backward\n')
+        t = time.mktime(datetime(2024, 3, 1, 12, 0).timetuple())
+        os.utime(path, (t, t))
+        with self.assertRaises(ml.YearError):
+            self.check(path)
+        self.assertEqual(ml.ref_date(path), (None, None))
+        gpar.live = True
+        self.assertEqual(ml.ref_date(path), (datetime(2024, 3, 1, 12, 0), 'the file time stamp'))
+        self.assertEqual(self.check(path), (1, [(2, '-1d 00:00:00.000000')]))
+
+    def test_main_default_path(self):
+        out = io.StringIO()
+        with mock.patch.object(ml, 'LIVE_DIR', LIVE), contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(ml.main(['-L', '-s']), 1)
+        self.assertEqual([l.split('\t')[0] for l in out.getvalue().splitlines()],
+                         [self.live('boot.msg:5'), self.live('localmessages:2'),
+                          self.live('messages:3'), self.live('messages-20240114:3')])
+
+    @unittest.skipIf(hasattr(os, 'geteuid') and os.geteuid() == 0, 'running as root')
+    def test_permission_hint(self):
+        tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmpdir)
+        path = os.path.join(tmpdir, 'messages')
+        open(path, 'w').close()
+        os.chmod(path, 0)
+        with self.assertLogs(ml.log, 'ERROR') as cm, \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(ml.main(['-L', tmpdir]), 2)
+        self.assertTrue(cm.output[0].endswith('(run as root?)'), cm.output[0])
 
 
 class TestCollectFiles(unittest.TestCase):
