@@ -788,6 +788,19 @@ class TestLive(CheckMixin, unittest.TestCase):
             self.assertEqual(ml.main(['-L', tmpdir]), 2)
         self.assertTrue(cm.output[0].endswith('(run as root?)'), cm.output[0])
 
+    @unittest.skipIf(hasattr(os, 'geteuid') and os.geteuid() == 0, 'running as root')
+    def test_permission_hint_all_files(self):
+        # -a scan: a warning with the hint, the file is not a known log
+        tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmpdir)
+        path = os.path.join(tmpdir, 'other.log')
+        open(path, 'w').close()
+        os.chmod(path, 0)
+        gpar.live = gpar.all_files = True
+        with self.assertLogs(ml.log, 'WARNING') as cm:
+            self.assertEqual(ml.collect_files([tmpdir]), [])
+        self.assertTrue(cm.output[0].endswith('(run as root?)'), cm.output[0])
+
 
 class TestThreshold(CheckMixin, unittest.TestCase):
     """Default threshold and resolution of timestamps with whole seconds"""

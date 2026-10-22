@@ -1,8 +1,8 @@
 #! /usr/bin/env python3
 """
 Synopsis:
-Check SUSE supportconfig messages*.txt and boot.txt files for non-monotonic
-timestamps.
+Check SUSE supportconfig messages*.txt and boot.txt files, the logs of a
+live system and the systemd journal for non-monotonic timestamps.
 
 Usage: %(appname)s [-hVvajLmpRrs][-t secs][-y year][-l log] [path...]
        -h, --help           this message
@@ -79,9 +79,13 @@ With -s, only the largest step of each file with backward steps:
     <file>:<lineno>  <negative delta>  <number of backward steps>
         <cumulated negative delta>  <log line>
 
+With -p, the reference line is printed before each step, followed by an
+empty line.
+
 A per file summary of files with backward steps and the total are printed
 to stderr. With -v, the number of checked lines (with timestamp) is added,
-with -vv, every checked file is listed, with its number of lines.
+with -vv, what will be done is described, and every checked file is listed,
+with its number of lines.
 Exit code: 0 = no backward steps, 1 = backward steps found,
 2 = a file could not be read (or decompressed, e.g. a truncated archive)
 or its year could not be validated,
@@ -103,10 +107,11 @@ as well.
 Traditional syslog timestamps carry no year. The year of the first one in
 a section is taken from option -y, or else counted backwards from the first
 full (RFC3339 or dmesg -T) timestamp, or from the date in the file name
-(messages-yyyymmdd.txt) or the supportconfig directory name
-(scc_<host>_yymmdd_hhmm), with -L also from the file time stamp. From
-there, years are counted forwards, a step from December to January is
-treated as a year change, not as a backward step. At each full timestamp, the year is resynced. A warning is printed,
+(messages-yyyymmdd.txt) or the nearest supportconfig directory or archive
+name above the file (scc_<host>_yymmdd_hhmm[ss][_<suffix>]), with -L also
+from the file time stamp. From there, years are counted forwards, a step
+from December to January is treated as a year change, not as a backward
+step. At each full timestamp, the year is resynced. A warning is printed,
 if a derived year is inconsistent with a full timestamp or the date of the
 file or directory name.
 Without -y, a file is skipped with an error, if no year source exists, or
@@ -124,7 +129,7 @@ License:
 # vim:set et ts=8 sw=4:
 #
 
-__version__ = '0.20'
+__version__ = '0.21'
 __author__ = 'Hans-Peter Jansen <hpj@urpla.net>'
 __license__ = 'GNU GPL v2 - see http://www.gnu.org/licenses/gpl2.txt for details'
 
@@ -386,7 +391,8 @@ def is_log_file(path):
         with open_text(path) as fh:
             return has_log_run(fh)
     except READ_ERRORS as e:
-        log.warning('%s: skipped: %s', path, e)
+        log.warning('%s: skipped: %s%s', path, e,
+                    ' (run as root?)' if isinstance(e, PermissionError) else '')
         return False
 
 
@@ -494,7 +500,7 @@ def start_year(path, entries):
 
 
 def assign_years(path, entries):
-    """Set the timestamp of traditional syslog entries [no, line, ts, fields]
+    """Set the timestamp of traditional syslog entries [no, line, ts, fields, coarse]
 
     The year of the first syslog entry is taken from option -y, or counted
     backwards from the first full (RFC3339 or dmesg -T) timestamp, or from
@@ -904,7 +910,7 @@ def describe_plan(args):
         log.info('printing only the largest step per file, with count and sum')
     if gpar.show_prev:
         log.info('printing the reference line before each step')
-    if gpar.year:
+    if gpar.year is not None:
         log.info('syslog year: starting with %d', gpar.year)
     else:
         log.info('syslog year: derived from full timestamps and file or folder names%s',

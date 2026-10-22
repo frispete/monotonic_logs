@@ -5,8 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project
 
 `monotonic_logs.py` checks SUSE supportconfig `messages*.txt` and `boot.txt`
-files for non-monotonic (backward stepping) timestamps and reports every line whose
-timestamp is earlier than its reference timestamp.
+files (also in tar archives), the logs of a live system (`-L`) and the
+systemd journal (`-j`) for non-monotonic (backward stepping) timestamps and
+reports every line whose timestamp is earlier than its reference timestamp.
 
 ## Requirements
 
@@ -63,8 +64,9 @@ timestamp is earlier than its reference timestamp.
   by default. `-t 0` reports all (no resolution added).
 - Rotated logs (`is_rotated()`, `ROTATED_RE` on the name without `.gz`/`.xz`:
   `-yyyymmdd[.txt|.log]`, `.N`, `.old`, `boot.omsg`) are only included in
-  directory searches (both modes, also `-a` extras and `-r`) with `-R`.
-  Files and globs given on the command line are always checked.
+  directory searches and archive members (both modes, also `-a` extras and
+  `-r`) with `-R`. Files and globs given on the command line are always
+  checked.
 - systemd journal (`-j`): `journal_logs()` runs `journalctl --list-boots`
   (`BOOT_RE`, with or without header line) and per boot, oldest first,
   `journalctl --no-pager -q -o short-iso-precise -b <id>` (`short-iso` for
@@ -82,7 +84,9 @@ timestamp is earlier than its reference timestamp.
   `path` defaults to `LIVE_DIR` (`/var/log`). `-a` / `-r` / `-R` work as usual.
   These files have no `#==[` headers, so they are processed completely.
   Only with `-L` the file mtime is a (last resort) year source. Permission
-  errors keep exit code 2, with the hint `(run as root?)`.
+  errors keep exit code 2, with the hint `(run as root?)`; in the `-a` scan
+  (`is_log_file()`), they are a warning with the same hint (the file is
+  skipped, exit code unchanged).
 - Compressed files are read via `gzip` / `lzma`, detected by magic bytes
   (`MAGICS`, `opener()`, `decompress()`), not by extension (real data has
   gzip files named `.txz`). `COMPRESSED_EXTS` is only used to strip
@@ -166,7 +170,8 @@ timestamp is earlier than its reference timestamp.
 `path` may be a file, a tar archive, a glob pattern (which may also match directories), or
 a directory (`dir_files()`, with `-r` for each directory of the tree; searched for
 `DIR_PATTERNS`: `messages*.txt`, `messages*.gz`, `messages*.xz`, `boot.txt`,
-`boot.txt.gz`, `boot.txt.xz`). With `-a`, also all other non-binary regular
+`boot.txt.gz`, `boot.txt.xz`, with `-L` for `LIVE_PATTERNS`, and for tar
+archives, see above). With `-a`, also all other non-binary regular
 files with at least 5 consecutive lines starting with a
 supported timestamp (`is_log_file()`, a pre-scan with the combined
 `LOG_LINE_RE`, which must stay in sync with `ISO_RE` / `MONO_RE` /
@@ -174,9 +179,10 @@ supported timestamp (`is_log_file()`, a pre-scan with the combined
 
 ## Architecture (single file)
 
-`main()` (getopt → `gpar`) → `process()` → `collect_files()` → per file
-`check_file()` → `log_sections()` (section detection, reads whole file) →
-per section `check_section()`. `check_file()` returns
+`main()` (getopt → `gpar`) → `process()` → `describe_plan()` (`-vv`) and
+`collect_files()` → per file (`archive_logs()` per archive member,
+`journal_logs()` per boot) `check_file()` → `log_sections()` (section
+detection, reads whole file) → per section `check_section()`. `check_file()` returns
 `(backward steps, checked lines, lines)`, `check_section()` `(hits, checked, state)`.
 `check_file()` accepts a list of lines (sections are detected) or a stream
 (the journal: one section, checked in chunks).
@@ -242,8 +248,8 @@ The script follows the author's standard skeleton. Keep it intact:
       sh -c 'zypper -q -n in python3 >/dev/null && python3 -m unittest discover -s tests -t . -v'
   ```
 - Test data lives in `testdata/` and must be synthetic or anonymized.
-  Compressed variants are created at runtime in a temp dir
-  (`TestCompressed`), don't commit binary test files.
+  Compressed variants and archives are created at runtime in a temp dir
+  (`TestCompressed`, `TestArchive`), don't commit binary test files.
   Never commit real supportconfig data (hostnames, IPs, user names).
 - Run the tests after every change; also check that the script still runs
   under Python 3.6 if an interpreter is available (e.g. a SLES 15 container).
@@ -267,7 +273,7 @@ option `-R` for rotated logs (0.12), default threshold 0.25 s plus
 resolution of whole seconds (0.13), checked lines with `-v` / `-vv` (0.14), tar archives (0.15), warn and localmessages
 sections (0.16), systemd journal `-j` (0.17), one step per run below the
 maximum with `-m` (0.18), archives not scanned by `-a`, wider
-`SCC_DATE_RE` (0.19), plan messages with `-vv` (0.20).
+`SCC_DATE_RE` (0.19), plan messages with `-vv` (0.20), consistency fixes (0.21).
 
 1. Possible: restrict `-j` to selected boots (all boots are checked now).
 
