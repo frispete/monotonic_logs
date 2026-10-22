@@ -205,9 +205,51 @@ class TestCheckFile(CheckMixin, unittest.TestCase):
                          (2, [(12, '-00:00:00.500000'), (15, '-00:01:02.000000')]))
 
     def test_against_max(self):
+        # line 13 is still below the maximum: same backward step as line 12
         self.assertEqual(self.check('messages.txt', against_max = True),
-                         (3, [(12, '-00:00:00.500000'), (13, '-00:00:00.200000'),
-                              (15, '-00:01:02.000000')]))
+                         (2, [(12, '-00:00:00.500000'), (15, '-00:01:02.000000')]))
+
+    POSTFIX = ['2026-05-25T05:32:39.758522+02:00 host1 postfix/qmgr[2]: removed',
+               '2026-05-24T22:17:06.510027+02:00 host1 postfix[1]: restart',
+               '2026-05-24T22:17:06.510051+02:00 host1 postfix[1]: see',
+               '2026-05-24T22:17:06.711692+02:00 host1 postfix[1]: starting',
+               'continuation line',
+               '2026-05-25T05:32:40.000000+02:00 host1 postfix[1]: caught up',
+               '2026-05-25T05:32:41.000000+02:00 host1 postfix[1]: forward',
+               '2026-05-25T05:32:40.500000+02:00 host1 postfix[1]: new step']
+
+    def postfix(self):
+        tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmpdir)
+        path = os.path.join(tmpdir, 'mail')
+        with open(path, 'w') as fh:
+            fh.write('\n'.join(self.POSTFIX) + '\n')
+        return path
+
+    def test_against_max_one_step(self):
+        # lines below the maximum after a jump back are one backward step,
+        # reported at its first line with the size of the jump
+        path = self.postfix()
+        self.assertEqual(self.check(path, against_max = True),
+                         (2, [(2, '-07:15:33.248495'), (8, '-00:00:00.500000')]))
+        # without -m, the lines after the jump are steps forward
+        gpar.against_max = False
+        self.assertEqual(self.check(path), (2, [(2, '-07:15:33.248495'),
+                                                (8, '-00:00:00.500000')]))
+
+    def test_against_max_within_threshold_ends_step(self):
+        # a line within the threshold below the maximum ends the step
+        path = self.postfix()
+        gpar.threshold = timedelta(seconds = 1)
+        self.assertEqual(self.check(path, against_max = True),
+                         (1, [(2, '-07:15:33.248495')]))
+
+    def test_against_max_across_chunks(self):
+        for chunk in (1, 2, 3):
+            with mock.patch.object(ml, 'CHUNK_LINES', chunk), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                gpar.against_max = True
+                self.assertEqual(ml.check_file('mail', iter(self.POSTFIX))[:2], (2, 7))
 
     def test_threshold(self):
         self.assertEqual(self.check('messages.txt', threshold = timedelta(seconds = 60)),
@@ -255,13 +297,13 @@ class TestCheckFile(CheckMixin, unittest.TestCase):
     def test_summary_with_prev_and_max(self):
         count, lines = self.output('messages.txt', summary = True, show_prev = True,
                                    against_max = True)
-        self.assertEqual(count, 3)
+        self.assertEqual(count, 2)
         prev, hit, blank = lines
         # with -m, the reference is the maximum before the step (line 14)
         self.assertEqual(prev, data('messages.txt') + ':14\t' + ' ' * 16 + '\t\t\t'
                          '2024-01-15T10:00:02.000000+01:00 host1 kernel: forward')
-        self.assertTrue(hit.startswith(data('messages.txt') + ':15\t-00:01:02.000000\t3\t'
-                                       '-00:01:02.700000\t'))
+        self.assertTrue(hit.startswith(data('messages.txt') + ':15\t-00:01:02.000000\t2\t'
+                                       '-00:01:02.500000\t'))
         self.assertEqual(blank, '')
 
     def test_summary_without_steps(self):

@@ -19,7 +19,8 @@ Usage: %(appname)s [-hVvajLmpRrs][-t secs][-y year][-l log] [path...]
                             warn, localmessages, boot.msg (with -R also
                             rotated, boot.omsg); path defaults to /var/log
        -m, --max            compare against the highest timestamp seen so far
-                            instead of the previous line
+                            instead of the previous line; consecutive lines
+                            below it count as one backward step
        -p, --prev           print the reference line before each hit
        -R, --rotated        include rotated logs in directory searches
                             (e.g. messages-yyyymmdd.txt, messages-*.xz,
@@ -122,7 +123,7 @@ License:
 # vim:set et ts=8 sw=4:
 #
 
-__version__ = '0.17'
+__version__ = '0.18'
 __author__ = 'Hans-Peter Jansen <hpj@urpla.net>'
 __license__ = 'GNU GPL v2 - see http://www.gnu.org/licenses/gpl2.txt for details'
 
@@ -644,7 +645,10 @@ def check_section(path, lines, state = None):
 
     # with whole seconds, the resolution is added to the threshold
     coarse_threshold = gpar.threshold + RESOLUTION if gpar.threshold else gpar.threshold
-    prev_ts, prev_line, prev_no, prev_coarse = state or (None, None, None, None)
+    # behind: with -m, the previous line was a backward step already, so
+    # lines below the maximum continue that step instead of starting a new one
+    prev_ts, prev_line, prev_no, prev_coarse, behind = \
+        state or (None, None, None, None, False)
     hits = []
     for no, line, ts, _, coarse in entries:
         if ts is None:
@@ -653,6 +657,7 @@ def check_section(path, lines, state = None):
         if prev_ts is not None and isinstance(ts, timedelta) != isinstance(prev_ts, timedelta):
             # clock type changed (time since boot <-> wall clock): start over
             prev_ts = None
+            behind = False
         if prev_ts is not None:
             if isinstance(ts, timedelta):
                 delta = ts - prev_ts
@@ -661,14 +666,17 @@ def check_section(path, lines, state = None):
                 delta = a - b
             threshold = coarse_threshold if coarse or prev_coarse else gpar.threshold
             if delta < timedelta(0) and -delta >= threshold:
-                hits.append((no, delta, line, prev_no, prev_line))
+                if not behind:
+                    hits.append((no, delta, line, prev_no, prev_line))
                 if gpar.against_max:
                     # keep the maximum as reference
+                    behind = True
                     continue
+            behind = False
         prev_ts, prev_line, prev_no, prev_coarse = ts, line, no, coarse
 
     return (hits, sum(1 for e in entries if e[2] is not None),
-            (prev_ts, prev_line, prev_no, prev_coarse))
+            (prev_ts, prev_line, prev_no, prev_coarse, behind))
 
 
 def is_rotated(path):

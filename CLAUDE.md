@@ -138,7 +138,8 @@ timestamp is earlier than its reference timestamp.
   -j, --journal         check the systemd journal, each boot separately
   -L, --live            search a live system (LIVE_PATTERNS), path
                         defaults to /var/log
-  -m, --max             compare against highest timestamp seen so far
+  -m, --max             compare against highest timestamp seen so far;
+                        consecutive lines below it are one backward step
   -p, --prev            print the reference line before each hit
   -R, --rotated         include rotated logs in directory searches
   -r, --recursive       search directories recursively (os.walk, sorted,
@@ -184,6 +185,10 @@ per section `check_section()`. `check_file()` returns
   they raise `YearError`.
 - `-m` works by *not* updating `prev_*` after a hit, so the reference stays
   the maximum; with `-p` the "previous" line printed is that maximum line.
+  Consecutive lines below the maximum are one backward step (`behind`,
+  part of the carried state), reported at its first line with the size of
+  the jump; it ends at the first line that is no backward step (at or
+  within the threshold below the maximum).
 - Options are stored as class attributes on `gpar`, so they persist across
   `main()` calls. Tests must save and restore `gpar.against_max`,
   `show_prev`, `threshold`, `year`, `journal`, ... and `loglevel`. In the
@@ -249,7 +254,8 @@ sections, quiet zero lines, cumulated delta in `-s` (0.9), option `-r`
 (0.10), option `-L` for live systems and time since boot timestamps (0.11),
 option `-R` for rotated logs (0.12), default threshold 0.25 s plus
 resolution of whole seconds (0.13), checked lines with `-v` / `-vv` (0.14), tar archives (0.15), warn and localmessages
-sections (0.16), systemd journal `-j` (0.17).
+sections (0.16), systemd journal `-j` (0.17), one step per run below the
+maximum with `-m` (0.18).
 
 1. Possible: restrict `-j` to selected boots (all boots are checked now).
 
