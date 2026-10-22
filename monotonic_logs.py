@@ -24,7 +24,9 @@ Usage: %(appname)s [-hVvaLmpRrs][-t secs][-y year][-l log] path...
                             directories are not followed)
        -s, --summary        print only the largest backward step per file,
                             with the number and sum of backward steps
-       -t, --threshold=secs report only backward steps >= secs (default: 0)
+       -t, --threshold=secs report only backward steps >= secs (default: 0.25);
+                            for timestamps with whole seconds, their
+                            resolution of 1 sec is added; -t 0 reports all
        -y, --year=year      year of the first traditional syslog timestamp,
                             required if it cannot be validated (see Notes)
 
@@ -109,7 +111,7 @@ License:
 # vim:set et ts=8 sw=4:
 #
 
-__version__ = '0.12'
+__version__ = '0.13'
 __author__ = 'Hans-Peter Jansen <hpj@urpla.net>'
 __license__ = 'GNU GPL v2 - see http://www.gnu.org/licenses/gpl2.txt for details'
 
@@ -127,6 +129,12 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 
+# default threshold: tolerate small deviations, e.g. caused by locking
+DEFAULT_THRESHOLD = 0.25
+# resolution of timestamps with whole seconds
+RESOLUTION = timedelta(seconds = 1)
+
+
 class gpar:
     """Global parameter class"""
     appdir, appname = os.path.split(sys.argv[0])
@@ -141,7 +149,7 @@ class gpar:
     logfile = None
     against_max = False
     show_prev = False
-    threshold = timedelta(0)
+    threshold = timedelta(seconds = DEFAULT_THRESHOLD)
     summary = False
     all_files = False
     recursive = False
@@ -505,7 +513,8 @@ def check_section(path, lines):
         m = ISO_RE.match(line)
         if m:
             try:
-                entries.append([no, line, parse_iso(m), None])
+                # whole seconds without fraction
+                entries.append([no, line, parse_iso(m), None, m.group(7) is None])
             except ValueError:
                 log.debug('%s:%d: invalid timestamp', path, no)
             continue
@@ -515,14 +524,14 @@ def check_section(path, lines):
             # time since boot, a timedelta: never compared with wall clock
             entries.append([no, line, timedelta(seconds = int(secs),
                                                 microseconds = int(frac[:6].ljust(6, '0'))),
-                            None])
+                            None, False])
             continue
         m = DMESG_RE.match(line)
         if m and m.group(1) in MONTHS:
             mon, day, h, mi, s, y = m.groups()
             try:
                 entries.append([no, line, datetime(int(y), MONTHS[mon], int(day),
-                                                   int(h), int(mi), int(s)), None])
+                                                   int(h), int(mi), int(s)), None, True])
             except ValueError:
                 log.debug('%s:%d: invalid timestamp', path, no)
             continue
@@ -530,13 +539,15 @@ def check_section(path, lines):
         if m and m.group(1) in MONTHS:
             mon, day, h, mi, s = m.groups()
             entries.append([no, line, None,
-                            (MONTHS[mon], int(day), int(h), int(mi), int(s))])
+                            (MONTHS[mon], int(day), int(h), int(mi), int(s)), True])
         # else: continuation line or no timestamp
     assign_years(path, [e for e in entries if not isinstance(e[2], timedelta)])
 
-    prev_ts = prev_line = prev_no = None
+    # with whole seconds, the resolution is added to the threshold
+    coarse_threshold = gpar.threshold + RESOLUTION if gpar.threshold else gpar.threshold
+    prev_ts = prev_line = prev_no = prev_coarse = None
     hits = []
-    for no, line, ts, _ in entries:
+    for no, line, ts, _, coarse in entries:
         if ts is None:
             # invalid syslog date
             continue
@@ -549,12 +560,13 @@ def check_section(path, lines):
             else:
                 a, b = comparable(ts, prev_ts)
                 delta = a - b
-            if delta < timedelta(0) and -delta >= gpar.threshold:
+            threshold = coarse_threshold if coarse or prev_coarse else gpar.threshold
+            if delta < timedelta(0) and -delta >= threshold:
                 hits.append((no, delta, line, prev_no, prev_line))
                 if gpar.against_max:
                     # keep the maximum as reference
                     continue
-        prev_ts, prev_line, prev_no = ts, line, no
+        prev_ts, prev_line, prev_no, prev_coarse = ts, line, no, coarse
 
     return hits
 

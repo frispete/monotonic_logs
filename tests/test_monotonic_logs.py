@@ -44,6 +44,8 @@ class GparMixin:
 
     def setUp(self):
         self._gpar = dict((a, getattr(gpar, a)) for a in self.GPAR_ATTRS)
+        # detection tests run with -t 0, the default is tested in TestThreshold
+        gpar.threshold = timedelta(0)
 
     def tearDown(self):
         for a, v in self._gpar.items():
@@ -720,6 +722,67 @@ class TestLive(CheckMixin, unittest.TestCase):
                 contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(ml.main(['-L', tmpdir]), 2)
         self.assertTrue(cm.output[0].endswith('(run as root?)'), cm.output[0])
+
+
+class TestThreshold(CheckMixin, unittest.TestCase):
+    """Default threshold and resolution of timestamps with whole seconds"""
+
+    def setUp(self):
+        CheckMixin.setUp(self)
+        gpar.threshold = timedelta(seconds = ml.DEFAULT_THRESHOLD)
+
+    def write(self, *lines):
+        tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmpdir)
+        path = os.path.join(tmpdir, 'messages.txt')
+        with open(path, 'w') as fh:
+            fh.write('\n'.join(lines) + '\n')
+        return path
+
+    def test_default(self):
+        self.assertEqual(ml.DEFAULT_THRESHOLD, 0.25)
+        self.assertEqual(ml.gpar.__dict__['threshold'], timedelta(seconds = 0.25))
+
+    def test_fractions(self):
+        # 0.023456 s is filtered, 31 min reported
+        self.assertEqual(self.check('messages-20240115.txt'), (1, [(7, '-00:31:00.500000')]))
+        self.assertEqual(self.check('messages.txt'),
+                         (2, [(12, '-00:00:00.500000'), (15, '-00:01:02.000000')]))
+        path = self.write('2024-01-15T10:00:00.300000Z a', '2024-01-15T10:00:00.050000Z b')
+        self.assertEqual(self.check(path), (1, [(2, '-00:00:00.250000')]))
+
+    def test_whole_seconds(self):
+        # syslog, journal short, dmesg -T, RFC3339 without fraction: -1 s is
+        # within the resolution, -2 s is reported
+        self.assertEqual(self.check('messages-20240103.txt'), (0, []))
+        self.assertEqual(self.check(BOOT), (1, [(46, '-00:00:02.000000')]))
+        # one coarse timestamp of a pair is enough
+        path = self.write('2024-01-15T10:00:01Z a', '2024-01-15T10:00:00.5Z b',
+                          '2024-01-15T10:00:02.5Z c', '2024-01-15T10:00:02Z d')
+        self.assertEqual(self.check(path), (0, []))
+        path = self.write('2024-01-15T10:00:02Z a', '2024-01-15T10:00:00.75Z b')
+        self.assertEqual(self.check(path), (1, [(2, '-00:00:01.250000')]))
+
+    def test_time_since_boot(self):
+        self.assertEqual(self.check(os.path.join('live', 'boot.msg')), (0, []))
+
+    def test_explicit(self):
+        self.assertEqual(self.check('messages-20240103.txt', threshold = timedelta(0)),
+                         (1, [(5, '-00:00:01.000000')]))
+        # resolution added to explicit thresholds, too
+        path = self.write('Jan 15 10:00:03 host1 a', 'Jan 15 10:00:00 host1 b')
+        self.assertEqual(self.check(path, threshold = timedelta(seconds = 2.1), year = 2024),
+                         (0, []))
+        self.assertEqual(self.check(path, threshold = timedelta(seconds = 1.9)),
+                         (1, [(2, '-00:00:03.000000')]))
+
+    def test_main(self):
+        def main(*argv):
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                return ml.main(list(argv))
+        self.assertEqual(main(data('messages-20240103.txt')), 0)
+        self.assertEqual(main('-t', '0', data('messages-20240103.txt')), 1)
 
 
 class TestCollectFiles(unittest.TestCase):

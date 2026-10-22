@@ -51,6 +51,12 @@ timestamp is earlier than its reference timestamp.
     exists or the derived year gives Feb 29 in a non-leap year. With `-y`,
     such a line is skipped with a warning.
 - Lines without a timestamp (continuation lines) are skipped.
+- Threshold: default `DEFAULT_THRESHOLD` (0.25 s) to tolerate small
+  deviations (locking; real data: 160 of 161 RFC3339 steps < 0.25 s). For
+  pairs where either timestamp has whole seconds (traditional syslog,
+  journal short, `dmesg -T`, RFC3339 without fraction; 5th entry element
+  `coarse`), `RESOLUTION` (1 s) is added, so `-1 s` steps are not reported
+  by default. `-t 0` reports all (no resolution added).
 - Rotated logs (`is_rotated()`, `ROTATED_RE` on the name without `.gz`/`.xz`:
   `-yyyymmdd[.txt|.log]`, `.N`, `.old`, `boot.omsg`) are only included in
   directory searches (both modes, also `-a` extras and `-r`) with `-R`.
@@ -108,7 +114,8 @@ timestamp is earlier than its reference timestamp.
                         symlinked directories not followed)
   -s, --summary         print only the largest backward step per file,
                         with the number and sum of backward steps
-  -t, --threshold=secs  report only backward steps >= secs
+  -t, --threshold=secs  report only backward steps >= secs (default 0.25,
+                        +1 s for timestamps with whole seconds; 0: all)
   -y, --year=year       year of the first syslog timestamp (all files and
                         sections), required if it cannot be validated
 ```
@@ -129,7 +136,7 @@ supported timestamp (`is_log_file()`, a pre-scan with the combined
 per section `check_section()`.
 
 - `check_section()` works in two passes: first it collects entries
-  `[no, line, ts, fields]` (`ISO_RE`, then `MONO_RE`, then `DMESG_RE`, then `BSD_RE`; syslog
+  `[no, line, ts, fields, coarse]` (`ISO_RE`, then `MONO_RE`, then `DMESG_RE`, then `BSD_RE`; syslog
   entries have `ts = None` and the parsed `fields`), then `assign_years()` fills in
   syslog `ts` in one forward pass (start year from `start_year()`), then
   the hits are returned. `check_file()` collects the hits of all sections
@@ -145,7 +152,9 @@ per section `check_section()`.
   the maximum; with `-p` the "previous" line printed is that maximum line.
 - Options are stored as class attributes on `gpar`, so they persist across
   `main()` calls. Tests must save and restore `gpar.against_max`,
-  `show_prev`, `threshold`, `year` and `loglevel` (`GparMixin` in the tests).
+  `show_prev`, `threshold`, `year` and `loglevel` (`GparMixin` in the tests,
+  which also sets `threshold` to 0 for detection tests; the default is
+  tested in `TestThreshold`).
 - `check_file()` writes hits via `stdout()`. Capture `sys.stdout`
   in tests; `stdout`/`stderr` look up `sys.stdout`/`sys.stderr` at call
   time, so `contextlib.redirect_stdout` works.
@@ -202,7 +211,8 @@ Done: synthetic test data, unit tests, Python 3.6 verification (3.6.15),
 syslog year derivation (0.2), option `-y` (0.3), boot.txt sections (0.4), compressed input (0.5), summary option `-s` (0.6), option `-a` (0.7), cached tzinfo in `parse_iso()` (0.8, ~30% faster), journalctl `--output`
 sections, quiet zero lines, cumulated delta in `-s` (0.9), option `-r`
 (0.10), option `-L` for live systems and time since boot timestamps (0.11),
-option `-R` for rotated logs (0.12).
+option `-R` for rotated logs (0.12), default threshold 0.25 s plus
+resolution of whole seconds (0.13).
 
 1. Option `-j` (discuss first): check the systemd journal of a live system
    via `journalctl --no-pager -o short-iso-precise` (subprocess, stdlib),
