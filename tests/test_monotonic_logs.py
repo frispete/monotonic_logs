@@ -38,7 +38,7 @@ def data(name):
 class GparMixin:
     """Save and restore the global parameters around each test"""
     GPAR_ATTRS = ('loglevel', 'logfile', 'against_max', 'show_prev', 'threshold',
-                  'summary', 'all_files', 'year')
+                  'summary', 'all_files', 'recursive', 'year')
 
     def setUp(self):
         self._gpar = dict((a, getattr(gpar, a)) for a in self.GPAR_ATTRS)
@@ -550,6 +550,69 @@ class TestAllFiles(CheckMixin, unittest.TestCase):
                 contextlib.redirect_stderr(io.StringIO()) as err:
             self.assertEqual(ml.main(['-a', self.tmpdir]), 1)
         self.assertEqual(err.getvalue().splitlines()[-1], 'total: 2 backward steps')
+
+
+class TestRecursive(GparMixin, unittest.TestCase):
+    """Option -r: search directories recursively"""
+    ISO = ['2024-01-15T10:00:%02d+01:00 host1 line %d' % (i, i) for i in range(6)]
+
+    def setUp(self):
+        GparMixin.setUp(self)
+        self.tmpdir = tempfile.mkdtemp()
+        for name in ('messages.txt', os.path.join('b', 'boot.txt'),
+                     os.path.join('b', 'c', 'messages-20240103.txt'),
+                     os.path.join('a', 'app.log'),
+                     os.path.join('b', 'messages-dir.txt', 'messages.txt')):
+            self.write(name, *self.ISO)
+        os.symlink(self.tmpdir, self.path('b', 'loop'))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+        GparMixin.tearDown(self)
+
+    def path(self, *names):
+        return os.path.join(self.tmpdir, *names)
+
+    def write(self, name, *lines):
+        path = self.path(name)
+        os.makedirs(os.path.dirname(path), exist_ok = True)
+        with open(path, 'w') as fh:
+            fh.write('\n'.join(lines) + '\n')
+
+    def test_not_recursive(self):
+        self.assertEqual(ml.collect_files([self.tmpdir]), [self.path('messages.txt')])
+
+    def test_recursive(self):
+        gpar.recursive = True
+        # sorted per directory, top down; the directory messages-dir.txt is
+        # searched, not taken as file; the symlink loop is not followed
+        self.assertEqual(ml.collect_files([self.tmpdir]),
+                         [self.path('messages.txt'), self.path('b', 'boot.txt'),
+                          self.path('b', 'c', 'messages-20240103.txt'),
+                          self.path('b', 'messages-dir.txt', 'messages.txt')])
+
+    def test_recursive_all(self):
+        gpar.recursive = gpar.all_files = True
+        self.assertIn(self.path('a', 'app.log'), ml.collect_files([self.tmpdir]))
+
+    def test_glob_matching_directories(self):
+        self.assertEqual(ml.collect_files([self.path('[ab]')]),
+                         [self.path('b', 'boot.txt')])
+        gpar.recursive = True
+        self.assertEqual(ml.collect_files([self.path('[ab]')]),
+                         [self.path('b', 'boot.txt'),
+                          self.path('b', 'c', 'messages-20240103.txt'),
+                          self.path('b', 'messages-dir.txt', 'messages.txt')])
+
+    def test_main_nested_scc_directory(self):
+        # the year comes from the nested scc directory
+        scc = os.path.join('case', 'scc_host1_240115_1200')
+        self.write(os.path.join(scc, 'messages.txt'), 'Jan 15 10:00:01 host1 a',
+                   'Jan 15 10:00:00 host1 backward')
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(ml.main(['-r', '-s', self.path('case')]), 1)
+        self.assertTrue(out.getvalue().startswith(self.path(scc, 'messages.txt') + ':2\t'))
 
 
 class TestCollectFiles(unittest.TestCase):

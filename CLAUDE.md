@@ -77,7 +77,7 @@ timestamp is earlier than its reference timestamp.
 ## Usage
 
 ```
-./monotonic_logs.py [-hVvamps][-t secs][-y year][-l log] path...
+./monotonic_logs.py [-hVvamprs][-t secs][-y year][-l log] path...
   -h, --help            usage
   -V, --version         print version and exit
   -v, --verbose         verbose (cumulative: -v warning, -vv info, -vvv debug)
@@ -86,6 +86,8 @@ timestamp is earlier than its reference timestamp.
                         logs, and check all sections with logs
   -m, --max             compare against highest timestamp seen so far
   -p, --prev            print the reference line before each hit
+  -r, --recursive       search directories recursively (os.walk, sorted,
+                        symlinked directories not followed)
   -s, --summary         print only the largest backward step per file,
                         with the number and sum of backward steps
   -t, --threshold=secs  report only backward steps >= secs
@@ -93,10 +95,11 @@ timestamp is earlier than its reference timestamp.
                         sections), required if it cannot be validated
 ```
 
-`path` may be a file, a glob pattern, or a directory (searched for
+`path` may be a file, a glob pattern (which may also match directories), or
+a directory (`dir_files()`, with `-r` for each directory of the tree; searched for
 `DIR_PATTERNS`: `messages*.txt`, `messages*.gz`, `messages*.xz`, `boot.txt`,
 `boot.txt.gz`, `boot.txt.xz`). With `-a`, also all other non-binary regular
-files (non-recursive) with at least 5 consecutive lines starting with a
+files with at least 5 consecutive lines starting with a
 supported timestamp (`is_log_file()`, a pre-scan with the combined
 `LOG_LINE_RE`, which must stay in sync with `ISO_RE` / `DMESG_RE` /
 `BSD_RE`; `test_log_line_re` checks this).
@@ -179,7 +182,8 @@ The script follows the author's standard skeleton. Keep it intact:
 
 Done: synthetic test data, unit tests, Python 3.6 verification (3.6.15),
 syslog year derivation (0.2), option `-y` (0.3), boot.txt sections (0.4), compressed input (0.5), summary option `-s` (0.6), option `-a` (0.7), cached tzinfo in `parse_iso()` (0.8, ~30% faster), journalctl `--output`
-sections, quiet zero lines, cumulated delta in `-s` (0.9).
+sections, quiet zero lines, cumulated delta in `-s` (0.9), option `-r`
+(0.10).
 
 Further performance work (e.g. comparing raw RFC3339 strings) was considered
 and rejected as not worth the complexity (~13 s for a 771 MB supportconfig).

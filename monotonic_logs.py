@@ -4,7 +4,7 @@ Synopsis:
 Check SUSE supportconfig messages*.txt and boot.txt files for non-monotonic
 timestamps.
 
-Usage: %(appname)s [-hVvamps][-t secs][-y year][-l log] path...
+Usage: %(appname)s [-hVvamprs][-t secs][-y year][-l log] path...
        -h, --help           this message
        -V, --version        print version and exit
        -v, --verbose        verbose mode (cumulative)
@@ -14,6 +14,8 @@ Usage: %(appname)s [-hVvamps][-t secs][-y year][-l log] path...
        -m, --max            compare against the highest timestamp seen so far
                             instead of the previous line
        -p, --prev           print the reference line before each hit
+       -r, --recursive      search directories recursively (symlinked
+                            directories are not followed)
        -s, --summary        print only the largest backward step per file,
                             with the number and sum of backward steps
        -t, --threshold=secs report only backward steps >= secs (default: 0)
@@ -22,7 +24,8 @@ Usage: %(appname)s [-hVvamps][-t secs][-y year][-l log] path...
 
        path may be a file, a glob pattern, or a directory
        (directories are searched for messages*.txt and boot.txt, and
-       messages*.gz, messages*.xz, boot.txt.gz, boot.txt.xz)
+       messages*.gz, messages*.xz, boot.txt.gz, boot.txt.xz; glob patterns
+       may match directories, too)
 
 Description:
 Files with supportconfig "#==[" headers are checked in these sections:
@@ -66,7 +69,7 @@ Notes:
 Only the Python standard library is used, compatible with Python 3.6+ (SLES 15).
 Lines without a timestamp (continuation lines) are skipped.
 Files ending in .gz or .xz are decompressed on the fly.
-With -a, directories are also searched (non-recursively) for all other
+With -a, directories are also searched for all other
 non-binary files with at least 5 consecutive lines starting with a
 supported timestamp, and in files with "#==[" headers, all other sections
 with such lines are checked as well.
@@ -94,7 +97,7 @@ License:
 # vim:set et ts=8 sw=4:
 #
 
-__version__ = '0.9'
+__version__ = '0.10'
 __author__ = 'Hans-Peter Jansen <hpj@urpla.net>'
 __license__ = 'GNU GPL v2 - see http://www.gnu.org/licenses/gpl2.txt for details'
 
@@ -129,6 +132,7 @@ class gpar:
     threshold = timedelta(0)
     summary = False
     all_files = False
+    recursive = False
     year = None
 
 
@@ -514,23 +518,35 @@ def check_section(path, lines):
     return hits
 
 
+def dir_files(dirname):
+    """Return the sorted log files of one directory"""
+    found = set()
+    for pattern in DIR_PATTERNS:
+        found.update(path for path in glob.glob(os.path.join(dirname, pattern))
+                     if os.path.isfile(path))
+    if gpar.all_files:
+        for name in os.listdir(dirname):
+            path = os.path.join(dirname, name)
+            if path not in found and os.path.isfile(path) and is_log_file(path):
+                found.add(path)
+    return sorted(found)
+
+
 def collect_files(args):
     """Expand directories and glob patterns into a list of files"""
     files = []
     for arg in args:
-        if os.path.isdir(arg):
-            found = set()
-            for pattern in DIR_PATTERNS:
-                found.update(glob.glob(os.path.join(arg, pattern)))
-            if gpar.all_files:
-                for name in os.listdir(arg):
-                    path = os.path.join(arg, name)
-                    if path not in found and os.path.isfile(path) and is_log_file(path):
-                        found.add(path)
-            files.extend(sorted(found))
-        else:
-            matched = glob.glob(arg)
-            files.extend(sorted(matched) if matched else [arg])
+        matched = [arg] if os.path.isdir(arg) else sorted(glob.glob(arg)) or [arg]
+        for path in matched:
+            if not os.path.isdir(path):
+                files.append(path)
+            elif gpar.recursive:
+                # symlinked directories are not followed (os.walk default)
+                for root, dirs, _ in os.walk(path):
+                    dirs.sort()
+                    files.extend(dir_files(root))
+            else:
+                files.extend(dir_files(path))
     return files
 
 
@@ -573,9 +589,9 @@ def main(argv = None):
         argv = sys.argv[1:]
 
     try:
-        optlist, args = getopt.getopt(argv, 'hVvl:ampst:y:',
+        optlist, args = getopt.getopt(argv, 'hVvl:amprst:y:',
             ('help', 'version', 'verbose', 'logfile=', 'all',
-             'max', 'prev', 'summary', 'threshold=', 'year=')
+             'max', 'prev', 'recursive', 'summary', 'threshold=', 'year=')
         )
     except getopt.error as msg:
         exit(1, msg, True)
@@ -592,6 +608,8 @@ def main(argv = None):
             gpar.logfile = par
         elif opt in ('-a', '--all'):
             gpar.all_files = True
+        elif opt in ('-r', '--recursive'):
+            gpar.recursive = True
         elif opt in ('-m', '--max'):
             gpar.against_max = True
         elif opt in ('-p', '--prev'):
