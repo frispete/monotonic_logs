@@ -123,7 +123,7 @@ License:
 # vim:set et ts=8 sw=4:
 #
 
-__version__ = '0.18'
+__version__ = '0.19'
 __author__ = 'Hans-Peter Jansen <hpj@urpla.net>'
 __license__ = 'GNU GPL v2 - see http://www.gnu.org/licenses/gpl2.txt for details'
 
@@ -271,10 +271,12 @@ class JournalError(OSError):
 
 # date of rotated files, e.g. messages-20240115.txt
 FNAME_DATE_RE = re.compile(r'-((?:19|20)\d{6})(?!\d)')
-# collection date of supportconfig directories, e.g. scc_host1_240115_1200,
-# optionally with an UUID suffix
-SCC_DATE_RE = re.compile(r'(?:^|_)scc_.+_(\d{6})_\d{4}'
-                         r'(?:_[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})?$')
+# collection date of supportconfig directories or archives, e.g.
+# scc_host1_240115_1200, scc_host1_240115_120059, optionally with an UUID or
+# a word suffix (scc_host1_240115_120059_appcore)
+SCC_DATE_RE = re.compile(r'(?:^|_)scc_.+_(\d{6})_\d{4}(?:\d\d)?'
+                         r'(?:_[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|_[A-Za-z]+)?'
+                         r'(?:%s)?$' % '|'.join(re.escape(ext) for ext in ARCHIVE_EXTS))
 
 
 def exit(ret = 0, msg = None, usage = False):
@@ -431,20 +433,23 @@ class YearError(Exception):
 
 
 def ref_date(path):
-    """Return (date, source) from the name of a rotated file or its
-    supportconfig directory, or (None, None)"""
+    """Return (date, source) from the name of a rotated file or the nearest
+    supportconfig directory above it, or (None, None)"""
     m = FNAME_DATE_RE.search(os.path.basename(path))
     if m:
         try:
             return datetime.strptime(m.group(1), '%Y%m%d'), 'the file name'
         except ValueError:
             pass
-    m = SCC_DATE_RE.search(os.path.basename(os.path.dirname(os.path.abspath(path))))
-    if m:
-        try:
-            return datetime.strptime(m.group(1), '%y%m%d'), 'the supportconfig directory name'
-        except ValueError:
-            pass
+    # the nearest supportconfig directory (or archive) above the file
+    for name in reversed(os.path.dirname(os.path.abspath(path)).split(os.sep)):
+        m = SCC_DATE_RE.search(name)
+        if m:
+            try:
+                return datetime.strptime(m.group(1), '%y%m%d'), 'the supportconfig directory name'
+            except ValueError:
+                pass
+            break
     if gpar.live:
         # reliable on a live system only, not for copied data
         mtime = MEMBER_MTIMES.get(path)
@@ -689,27 +694,34 @@ def is_rotated(path):
 
 def dir_files(dirname):
     """Return the sorted log files of one directory, rotated ones only
-    with option -R"""
+    with option -R, tar archives not with option -L"""
     found = set()
+    named = [path for ext in ARCHIVE_EXTS
+             for path in glob.glob(os.path.join(dirname, '*' + ext))
+             if os.path.isfile(path)]
+    archives = set(path for path in named if is_archive(path))
     for pattern in LIVE_PATTERNS if gpar.live else DIR_PATTERNS:
         found.update(path for path in glob.glob(os.path.join(dirname, pattern))
                      if os.path.isfile(path))
     if gpar.all_files:
         for name in os.listdir(dirname):
             path = os.path.join(dirname, name)
-            if path not in found and os.path.isfile(path) and \
+            if path not in found and path not in archives and os.path.isfile(path) and \
                     (gpar.rotated or not is_rotated(path)) and is_log_file(path):
                 found.add(path)
     if not gpar.rotated:
         found = set(path for path in found if not is_rotated(path))
-    if not gpar.live:
-        for pattern in ARCHIVE_EXTS:
-            for path in glob.glob(os.path.join(dirname, '*' + pattern)):
-                # skip archives, that are extracted next to them
-                if os.path.isdir(path[:-len(pattern)]):
-                    log.info('%s: skipped, extracted in %s', path, path[:-len(pattern)])
-                elif os.path.isfile(path):
-                    found.add(path)
+    for path in named:
+        ext = next(ext for ext in ARCHIVE_EXTS if path.endswith(ext))
+        if gpar.live:
+            # snapshots, not logs of the live system
+            if path in archives:
+                log.info('%s: archive skipped with -L', path)
+        # skip archives, that are extracted next to them
+        elif os.path.isdir(path[:-len(ext)]):
+            log.info('%s: skipped, extracted in %s', path, path[:-len(ext)])
+        else:
+            found.add(path)
     return sorted(found)
 
 

@@ -45,8 +45,10 @@ timestamp is earlier than its reference timestamp.
     December to January is a year change, not a backward step). The year of
     the first syslog line of a section comes from `-y`, or else is counted
     backwards from the first full (RFC3339 or dmesg) timestamp, or from the
-    date in the file name (`messages-yyyymmdd.txt`) or supportconfig
-    directory name (`[prefix_]scc_<host>_yymmdd_hhmm[_<uuid>]`); from there years are
+    date in the file name (`messages-yyyymmdd.txt`) or the nearest
+    supportconfig directory (or archive) name above the file
+    (`[prefix_]scc_<host>_yymmdd_hhmm[ss][_<uuid>|_<word>][.txz...]`, e.g.
+    `scc_host_220404_180040_appcore`); from there years are
     counted forwards and resynced at each full timestamp. The file mtime is
     not used for copied data (unreliable), only with `-L`.
   - Without `-y`, a file is skipped with an error (exit 2) if no year source
@@ -94,7 +96,9 @@ timestamp is earlier than its reference timestamp.
   `ref_date()` finds the `scc_*` date; `-L` uses the member mtime
   (`MEMBER_MTIMES`). A truncated archive reports the members read so far,
   then exit 2. Directory searches skip archives whose extracted directory
-  exists next to them, and all archives with `-L`.
+  exists next to them, and all archives with `-L` (`archive skipped with
+  -L`, visible with `-vv`: snapshots, not live logs). The `-a` scan
+  (`is_log_file()`) never sees archives.
 - Each file is checked independently.
 
 ## Output and exit codes
@@ -255,7 +259,8 @@ sections, quiet zero lines, cumulated delta in `-s` (0.9), option `-r`
 option `-R` for rotated logs (0.12), default threshold 0.25 s plus
 resolution of whole seconds (0.13), checked lines with `-v` / `-vv` (0.14), tar archives (0.15), warn and localmessages
 sections (0.16), systemd journal `-j` (0.17), one step per run below the
-maximum with `-m` (0.18).
+maximum with `-m` (0.18), archives not scanned by `-a`, wider
+`SCC_DATE_RE` (0.19).
 
 1. Possible: restrict `-j` to selected boots (all boots are checked now).
 

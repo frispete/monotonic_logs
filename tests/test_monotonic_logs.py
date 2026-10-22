@@ -395,7 +395,14 @@ class TestYear(CheckMixin, unittest.TestCase):
         self.assertEqual(ml.ref_date('/x/GCP_Files_scc_host1_240115_1200/boot.txt'), scc)
         self.assertEqual(ml.ref_date('/x/scc_SR0815_host1_240115_1200_'
                                      '44d8fde3-496a-4b6f-bf8b-f8854f84c5f1/x.txt'), scc)
-        self.assertEqual(ml.ref_date('/x/scc_host1_240115_1200_garbage/boot.txt'), none)
+        self.assertEqual(ml.ref_date('/x/scc_host1_240115_120059/boot.txt'), scc)
+        self.assertEqual(ml.ref_date('/x/scc_host1_240115_120059_appcore/boot.txt'), scc)
+        # member in the root of an archive
+        self.assertEqual(ml.ref_date('/x/scc_host1_240115_1200.txz/boot.txt'), scc)
+        self.assertEqual(ml.ref_date('/x/scc_host1_240115_1200/logs/x.log'), scc)
+        self.assertEqual(ml.ref_date('/scc_host1_230101_1200/scc_host1_240115_1200/x/y.log'), scc)
+        self.assertEqual(ml.ref_date('/x/scc_host1_240115_1200_garbage-1/boot.txt'), none)
+        self.assertEqual(ml.ref_date('/x/scc_host1_240115_12005/boot.txt'), none)
         self.assertEqual(ml.ref_date('/x/notscc_host1_240115_1200/boot.txt'), none)
         self.assertEqual(ml.ref_date('/x/scc_host1_241315_1200/boot.txt'), none)
         # the file name date has precedence
@@ -956,6 +963,17 @@ class TestArchive(GparMixin, unittest.TestCase):
         os.rmdir(os.path.join(self.tmpdir, self.SCC))
         gpar.live = True
         self.assertEqual(ml.collect_files([self.tmpdir]), [])
+
+    def test_directory_search_all_files(self):
+        path = self.archive()
+        gpar.all_files = True
+        with self.assertLogs(ml.log, 'INFO') as cm:
+            self.assertEqual(ml.collect_files([self.tmpdir]), [path])
+            gpar.live = True
+            self.assertEqual(ml.collect_files([self.tmpdir]), [])
+        # archives are not scanned as binary files
+        self.assertEqual([m.split(':', 2)[2] for m in cm.output],
+                         ['%s: archive skipped with -L' % path])
 
     def test_live_member_mtime(self):
         t = time.mktime(datetime(2024, 3, 1, 12, 0).timetuple())
