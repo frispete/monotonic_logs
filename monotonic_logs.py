@@ -43,7 +43,7 @@ Description:
 Files with supportconfig "#==[" headers are checked in these sections:
 
     #==[ Log File ]=====================================#
-    # /var/log/messages
+    # /var/log/messages                    (or /var/log/warn, localmessages)
 
     #==[ Command ]======================================#
     # /usr/bin/journalctl --no-pager --boot 0     (any --boot argument)
@@ -120,7 +120,7 @@ License:
 # vim:set et ts=8 sw=4:
 #
 
-__version__ = '0.15'
+__version__ = '0.16'
 __author__ = 'Hans-Peter Jansen <hpj@urpla.net>'
 __license__ = 'GNU GPL v2 - see http://www.gnu.org/licenses/gpl2.txt for details'
 
@@ -180,7 +180,8 @@ LOGFILE_RE = re.compile(r'^#==\[\s*Log File\s*\]=+#?\s*$')
 COMMAND_RE = re.compile(r'^#==\[\s*Command\s*\]=+#?\s*$')
 # (section header, following line) of log sections
 LOG_SECTIONS = (
-    (LOGFILE_RE, re.compile(r'^#\s*/var/log/messages\b')),
+    # messages.txt, messages_localwarn.txt
+    (LOGFILE_RE, re.compile(r'^#\s*/var/log/(?:messages|warn|localmessages)\b')),
     # journalctl options are only looked up before a pipe
     (COMMAND_RE, re.compile(r'^#\s*(?:/usr)?/bin/journalctl'
                             r'(?=[^|]*\s--no-pager\b)'

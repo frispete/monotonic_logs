@@ -1,0 +1,12 @@
+#==[ Summary ]======================================#
+# synthetic messages_localwarn.txt
+#==[ Log File ]=====================================#
+# /var/log/warn - Last 500 Lines
+2024-01-15T10:00:00.000000+01:00 host1 kernel: warn 1
+2024-01-15T09:59:00.000000+01:00 host1 kernel: warn backward 60s
+2024-01-15T10:01:00.000000+01:00 host1 kernel: warn 3
+
+#==[ Log File ]=====================================#
+# /var/log/localmessages
+Jan 15 10:00:00 host1 local0: syslog, year from the supportconfig directory
+Jan 15 09:00:00 host1 local0: backward 1h

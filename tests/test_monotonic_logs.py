@@ -29,6 +29,7 @@ TESTDATA = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 
 
 BOOT = os.path.join('scc_host1_240115_1200', 'boot.txt')
+LOCALWARN = os.path.join('scc_host1_240115_1200', 'messages_localwarn.txt')
 LIVE = os.path.join(TESTDATA, 'live')
 BOOT_HITS = (3, [(23, '-00:00:01.000000'), (39, '-00:00:01.000000'),
                  (46, '-00:00:02.000000')])
@@ -154,6 +155,11 @@ class TestLogSections(unittest.TestCase):
 
     def test_empty(self):
         self.assertEqual(ml.log_sections(data('messages-empty.txt')), [[]])
+
+    def test_localwarn_sections(self):
+        # /var/log/warn (with suffix) and /var/log/localmessages
+        sections = ml.log_sections(data(LOCALWARN))
+        self.assertEqual([(sec[0][0], sec[-1][0]) for sec in sections], [(5, 8), (11, 12)])
 
     def test_boot_sections(self):
         sections = ml.log_sections(data(BOOT))
@@ -296,6 +302,12 @@ class TestCheckFile(CheckMixin, unittest.TestCase):
         self.assertIn('messages-20250115.txt:2: warning: year 2025 derived from '
                       'the file name is inconsistent with the timestamp at line 1, '
                       'using 2024', self.warnings[0])
+
+    def test_localwarn(self):
+        # syslog year of localmessages from the supportconfig directory
+        self.assertEqual(self.check(LOCALWARN),
+                         (2, [(6, '-00:01:00.000000'), (12, '-01:00:00.000000')]))
+        self.assertEqual(self.warnings, [])
 
     def test_boot(self):
         # sections are independent: no step between them, year change in
@@ -935,7 +947,9 @@ class TestCollectFiles(unittest.TestCase):
                          [data('messages-20240301.txt'), data('messages-20240302.txt')])
 
     def test_boot_txt(self):
-        self.assertEqual(ml.collect_files([os.path.dirname(data(BOOT))]), [data(BOOT)])
+        scc = os.path.dirname(data(BOOT))
+        self.assertEqual(ml.collect_files([scc]),
+                         [data(BOOT), os.path.join(scc, 'messages_localwarn.txt')])
 
     def test_unmatched_is_kept(self):
         self.assertEqual(ml.collect_files(['/nonexistent/messages.txt']),

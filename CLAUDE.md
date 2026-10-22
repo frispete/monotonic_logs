@@ -17,7 +17,9 @@ timestamp is earlier than its reference timestamp.
 - Log section detection (`LOG_SECTIONS`):
   - Files with `#==[` headers are checked only in these sections, each
     independently:
-    - `#==[ Log File ]===...#` followed by `# /var/log/messages`
+    - `#==[ Log File ]===...#` followed by `# /var/log/messages`,
+      `# /var/log/warn` or `# /var/log/localmessages` (`messages.txt`,
+      `messages_localwarn.txt`; suffixes like `- Last 500 Lines` allowed)
     - `#==[ Command ]===...#` followed by `# {/usr,}/bin/journalctl ...` with
       `--no-pager` and any `--boot` (`--boot 0`, `--boot=-1`) or `--output` /
       `-o` form (e.g. `--output=short-iso | egrep ... | tail -500`), but not
@@ -230,7 +232,8 @@ syslog year derivation (0.2), option `-y` (0.3), boot.txt sections (0.4), compre
 sections, quiet zero lines, cumulated delta in `-s` (0.9), option `-r`
 (0.10), option `-L` for live systems and time since boot timestamps (0.11),
 option `-R` for rotated logs (0.12), default threshold 0.25 s plus
-resolution of whole seconds (0.13), checked lines with `-v` / `-vv` (0.14), tar archives (0.15).
+resolution of whole seconds (0.13), checked lines with `-v` / `-vv` (0.14), tar archives (0.15), warn and localmessages
+sections (0.16).
 
 1. Option `-j` (discuss first): check the systemd journal of a live system
    via `journalctl --no-pager -o short-iso-precise` (subprocess, stdlib),
