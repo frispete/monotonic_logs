@@ -52,7 +52,7 @@ reports every line whose timestamp is earlier than its reference timestamp.
     `scc_host_220404_180040_appcore`); from there years are
     counted forwards and resynced at each full timestamp. The file mtime is
     not used for copied data (unreliable), only with `-L`.
-  - Without `-y`, a file is skipped with an error (exit 2) if no year source
+  - Without `-y`, a file is skipped with an error (exit 3) if no year source
     exists or the derived year gives Feb 29 in a non-leap year. With `-y`,
     such a line is skipped with a warning.
 - Lines without a timestamp (continuation lines) are skipped.
@@ -76,7 +76,7 @@ reports every line whose timestamp is earlier than its reference timestamp.
   carried over (`check_section(..., state)`), to keep memory low (real
   journal: 9.7M lines, 130 MB instead of 4 GB). A journalctl hint about
   only seeing own messages gives one warning `(run as root?)`; journalctl
-  failures raise `JournalError` (an `OSError`, exit 2). `-j` needs no path;
+  failures raise `JournalError` (an `OSError`, exit 3). `-j` needs no path;
   it combines with paths and `-L`. Tests use a fake journalctl script.
 - Live system (`-L`): directories are searched for `LIVE_PATTERNS`
   (`messages`, `messages-*`, `warn`, `warn-*`, `localmessages`,
@@ -84,14 +84,14 @@ reports every line whose timestamp is earlier than its reference timestamp.
   `path` defaults to `LIVE_DIR` (`/var/log`). `-a` / `-r` / `-R` work as usual.
   These files have no `#==[` headers, so they are processed completely.
   Only with `-L` the file mtime is a (last resort) year source. Permission
-  errors keep exit code 2, with the hint `(run as root?)`; in the `-a` scan
+  errors keep exit code 3, with the hint `(run as root?)`; in the `-a` scan
   (`is_log_file()`), they are a warning with the same hint (the file is
   skipped, exit code unchanged).
 - Compressed files are read via `gzip` / `lzma`, detected by magic bytes
   (`MAGICS`, `opener()`, `decompress()`), not by extension (real data has
   gzip files named `.txz`). `COMPRESSED_EXTS` is only used to strip
   extensions for name checks. Corrupt or truncated files count as
-  unreadable (exit 2, `READ_ERRORS`).
+  unreadable (exit 3, `READ_ERRORS`).
 - Tar archives (`ARCHIVE_EXTS`: `.txz`, `.tar.xz`, `.tgz`, `.tar.gz`,
   `.tar`; `is_archive()` also checks the content) are read in one streaming
   pass (`archive_logs()`, `tarfile` mode `r|*`), never extracted. Members are
@@ -99,7 +99,7 @@ reports every line whose timestamp is earlier than its reference timestamp.
   depth <= 1, i.e. the `scc_*/` directory), named `<archive>/<member>`, so
   `ref_date()` finds the `scc_*` date; `-L` uses the member mtime
   (`MEMBER_MTIMES`). A truncated archive reports the members read so far,
-  then exit 2. Directory searches skip archives whose extracted directory
+  then exit 3. Directory searches skip archives whose extracted directory
   exists next to them, and all archives with `-L` (`archive skipped with
   -L`, visible with `-vv`: snapshots, not live logs). The `-a` scan
   (`is_log_file()`) never sees archives.
@@ -115,7 +115,8 @@ reports every line whose timestamp is earlier than its reference timestamp.
   reference line is printed before each printed step, followed by an empty
   line.
 - stderr: per file summary of files with backward steps, the total (always),
-  and warnings.
+  and warnings. Counts use singular / plural nouns (`plural()`:
+  `1 backward step`, `2 backward steps`, `in 1 file`).
   - `-v` adds `, <checked> lines checked` (lines with a valid timestamp in
     checked sections) to both, and `in <n> files` to the total; `-vv` lists
     every checked file and shows `<checked> of <lines> lines checked`
@@ -131,12 +132,11 @@ reports every line whose timestamp is earlier than its reference timestamp.
     inconsistent with a full timestamp (that year is used) or the
     file/directory name date, or (with `-y`) gives Feb 29 in a non-leap year
     (line skipped). Warnings don't change the exit code.
-- Exit codes: 0 = no backward steps, 1 = backward steps found,
-  2 = a file could not be read (or decompressed) or its year could not be
-  validated,
-  3 = interrupted (Ctrl-C).
-  Note: 1 is currently also returned for usage errors (bad option, invalid
-  `-t`, no path given) and when no files are found.
+- Exit codes: 0 = no backward steps, 1 = backward steps found or no files
+  found, 2 = usage error (bad option, invalid `-t` / `-y`, no path given),
+  3 = a file could not be read (or decompressed, also a given path that
+  doesn't exist) or its year could not be validated, 4 = interrupted
+  (Ctrl-C). A read error wins over backward steps.
 - All comments and user visible output in English.
 
 ## Usage
@@ -194,7 +194,7 @@ detection, reads whole file) → per section `check_section()`. `check_file()` r
   the hits are returned. `check_file()` collects the hits of all sections
   and prints them (or the `-s` summary) via `print_hit()`, so a `YearError`
   in any section prevents all output of that file; `process()` turns it
-  into an error and exit code 2.
+  into an error and exit code 3.
 - Mixed naive (syslog) and aware (ISO) timestamps are compared by stripping
   tzinfo in `comparable()`, so offsets are ignored in mixed comparisons.
 - Test files with only syslog timestamps need a dated file name or an
@@ -262,6 +262,8 @@ The script follows the author's standard skeleton. Keep it intact:
 - Commit after each working step with a concise English commit message.
 - Update this file as later changes are made.
 - `tmp/` is ignored local scratch (older drafts), not part of the project.
+- Keep `README.md` (brief user documentation: options, output, exit codes)
+  in sync with the usage text when options or output change.
 
 ## Suggested next steps
 
@@ -273,7 +275,8 @@ option `-R` for rotated logs (0.12), default threshold 0.25 s plus
 resolution of whole seconds (0.13), checked lines with `-v` / `-vv` (0.14), tar archives (0.15), warn and localmessages
 sections (0.16), systemd journal `-j` (0.17), one step per run below the
 maximum with `-m` (0.18), archives not scanned by `-a`, wider
-`SCC_DATE_RE` (0.19), plan messages with `-vv` (0.20), consistency fixes (0.21).
+`SCC_DATE_RE` (0.19), plan messages with `-vv` (0.20), consistency fixes (0.21), exit codes 2 = usage error, 3 = read
+error, 4 = interrupted, singular counts, README (0.22).
 
 1. Possible: restrict `-j` to selected boots (all boots are checked now).
 

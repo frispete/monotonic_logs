@@ -785,7 +785,7 @@ class TestLive(CheckMixin, unittest.TestCase):
         os.chmod(path, 0)
         with self.assertLogs(ml.log, 'ERROR') as cm, \
                 contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(ml.main(['-L', tmpdir]), 2)
+            self.assertEqual(ml.main(['-L', tmpdir]), 3)
         self.assertTrue(cm.output[0].endswith('(run as root?)'), cm.output[0])
 
     @unittest.skipIf(hasattr(os, 'geteuid') and os.geteuid() == 0, 'running as root')
@@ -964,7 +964,7 @@ class TestArchive(GparMixin, unittest.TestCase):
             fh.write(content[:len(content) * 2 // 3])
         with self.assertLogs(ml.log, 'ERROR') as cm:
             ret, out, err = self.run_main('-t', '0', path)
-        self.assertEqual(ret, 2)
+        self.assertEqual(ret, 3)
         self.assertTrue(cm.output[0].startswith('ERROR:%s:%s: ' % (ml.log.name, path)),
                         cm.output[0])
 
@@ -1066,12 +1066,12 @@ class TestJournal(CheckMixin, unittest.TestCase):
         self.assertEqual(ret, 1)
         self.assertEqual(out, [self.BOOT1 + ':3\t-00:00:01.000000\t'
                                '2024-01-15T10:00:01.500000+01:00 host1 backward 1s'])
-        self.assertEqual(err, [self.BOOT1 + ': 1 backward steps', 'total: 1 backward steps'])
+        self.assertEqual(err, [self.BOOT1 + ': 1 backward step', 'total: 1 backward step'])
 
     def test_list_boots_without_header(self):
         os.environ['FAKE_NO_HEADER'] = '1'
         self.assertEqual(self.run_main('-j', '-vv')[2][-1],
-                         'total: 1 backward steps, 6 of 6 lines checked in 2 files')
+                         'total: 1 backward step, 6 of 6 lines checked in 2 files')
 
     def test_old_systemd(self):
         # short-iso: whole seconds, the 1 s step is within the resolution
@@ -1088,13 +1088,13 @@ class TestJournal(CheckMixin, unittest.TestCase):
     def test_failure(self):
         os.environ['FAKE_FAIL'] = '1'
         with self.assertLogs(ml.log, 'ERROR') as cm:
-            self.assertEqual(self.run_main('-j')[0], 2)
+            self.assertEqual(self.run_main('-j')[0], 3)
         self.assertIn('Failed to read journal', cm.output[0])
 
     def test_missing_journalctl(self):
         with mock.patch.object(ml, 'JOURNALCTL', os.path.join(self.tmpdir, 'missing')), \
                 self.assertLogs(ml.log, 'ERROR'):
-            self.assertEqual(self.run_main('-j')[0], 2)
+            self.assertEqual(self.run_main('-j')[0], 3)
 
     def test_with_paths(self):
         ret, out, err = self.run_main('-j', data('messages.txt'))
@@ -1105,13 +1105,13 @@ class TestJournal(CheckMixin, unittest.TestCase):
         for chunk in (1, 2, 3, 100000):
             with mock.patch.object(ml, 'CHUNK_LINES', chunk):
                 self.assertEqual(self.run_main('-j', '-m', '-vv')[2][-1],
-                                 'total: 1 backward steps, 6 of 6 lines checked in 2 files')
+                                 'total: 1 backward step, 6 of 6 lines checked in 2 files')
                 self.assertEqual(self.run_main('-j')[1][0].split('\t')[0], self.BOOT1 + ':3')
 
     def test_no_path_needs_option(self):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
             ml.main([])
-        self.assertEqual(cm.exception.code, 1)
+        self.assertEqual(cm.exception.code, 2)
 
 
 class TestCollectFiles(unittest.TestCase):
@@ -1257,7 +1257,7 @@ class TestMain(GparMixin, unittest.TestCase):
     def test_verbose_skips_failed_files(self):
         with self.assertLogs(ml.log, 'ERROR'):
             lines = self.stderr('-vv', data('messages.txt'), '/nonexistent/messages.txt')
-        self.assertEqual(lines[-1], 'total: 2 backward steps, 7 of 20 lines checked in 1 files')
+        self.assertEqual(lines[-1], 'total: 2 backward steps, 7 of 20 lines checked in 1 file')
 
     def test_check_file_counts(self):
         with contextlib.redirect_stdout(io.StringIO()):
@@ -1278,7 +1278,7 @@ class TestMain(GparMixin, unittest.TestCase):
         self.assertEqual(self.main(TESTDATA), 1)
         # rotated messages-20230301.txt cannot be validated without -y
         with self.assertLogs(ml.log, 'ERROR'):
-            self.assertEqual(self.main('-R', TESTDATA), 2)
+            self.assertEqual(self.main('-R', TESTDATA), 3)
         self.assertEqual(self.main('--rotated', '-y', '2024', TESTDATA), 1)
 
     def test_explicit_rotated_file(self):
@@ -1287,11 +1287,11 @@ class TestMain(GparMixin, unittest.TestCase):
 
     def test_unreadable(self):
         with self.assertLogs(ml.log, 'ERROR'):
-            self.assertEqual(self.main('/nonexistent/messages.txt'), 2)
+            self.assertEqual(self.main('/nonexistent/messages.txt'), 3)
 
     def test_unreadable_wins_over_hits(self):
         with self.assertLogs(ml.log, 'ERROR'):
-            self.assertEqual(self.main(data('messages.txt'), '/nonexistent/messages.txt'), 2)
+            self.assertEqual(self.main(data('messages.txt'), '/nonexistent/messages.txt'), 3)
 
     def test_corrupt_compressed(self):
         tmpdir = tempfile.mkdtemp()
@@ -1305,22 +1305,27 @@ class TestMain(GparMixin, unittest.TestCase):
             with open(path, 'wb') as fh:
                 fh.write(content)
             with self.assertLogs(ml.log, 'ERROR'):
-                self.assertEqual(self.main(path), 2, name)
+                self.assertEqual(self.main(path), 3, name)
 
     def test_interrupted(self):
         with mock.patch.object(ml, 'check_file', side_effect = KeyboardInterrupt):
-            self.assertEqual(self.main(data('messages.txt')), 3)
+            self.assertEqual(self.main(data('messages.txt')), 4)
 
     def test_usage_errors(self):
-        self.assertEqual(self.main(), 1)
-        self.assertEqual(self.main('-x', data('messages.txt')), 1)
-        self.assertEqual(self.main('-t', 'abc', data('messages.txt')), 1)
-        self.assertEqual(self.main('-y', 'abc', data('messages.txt')), 1)
-        self.assertEqual(self.main('-y', '0', data('messages.txt')), 1)
+        self.assertEqual(self.main(), 2)
+        self.assertEqual(self.main('-x', data('messages.txt')), 2)
+        self.assertEqual(self.main('-t', 'abc', data('messages.txt')), 2)
+        self.assertEqual(self.main('-y', 'abc', data('messages.txt')), 2)
+        self.assertEqual(self.main('-y', '0', data('messages.txt')), 2)
+
+    def test_no_files_found(self):
+        tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmpdir)
+        self.assertEqual(self.main(tmpdir), 1)
 
     def test_year_not_validated(self):
         with self.assertLogs(ml.log, 'ERROR') as cm:
-            self.assertEqual(self.main(data('messages-20230301.txt')), 2)
+            self.assertEqual(self.main(data('messages-20230301.txt')), 3)
         self.assertIn('use -y', cm.output[0])
         self.assertEqual(self.main('--year=2024', data('messages-20230301.txt')), 0)
 

@@ -86,10 +86,9 @@ A per file summary of files with backward steps and the total are printed
 to stderr. With -v, the number of checked lines (with timestamp) is added,
 with -vv, what will be done is described, and every checked file is listed,
 with its number of lines.
-Exit code: 0 = no backward steps, 1 = backward steps found,
-2 = a file could not be read (or decompressed, e.g. a truncated archive)
-or its year could not be validated,
-3 = interrupted.
+Exit code: 0 = no backward steps, 1 = backward steps found or no files
+found, 2 = usage error, 3 = a file could not be read (or decompressed, e.g.
+a truncated archive) or its year could not be validated, 4 = interrupted.
 
 Notes:
 Only the Python standard library is used, compatible with Python 3.6+ (SLES 15).
@@ -129,7 +128,7 @@ License:
 # vim:set et ts=8 sw=4:
 #
 
-__version__ = '0.21'
+__version__ = '0.22'
 __author__ = 'Hans-Peter Jansen <hpj@urpla.net>'
 __license__ = 'GNU GPL v2 - see http://www.gnu.org/licenses/gpl2.txt for details'
 
@@ -845,13 +844,18 @@ def journal_logs():
         yield 'journal/%s' % boot, journal_stream(warned, '-q', '-o', fmt, '-b', boot)
 
 
+def plural(n, word):
+    """Format a count with a singular or plural noun"""
+    return '%d %s%s' % (n, word, '' if n == 1 else 's')
+
+
 def fmt_checked(checked, nlines, suffix = ''):
     """Format the number of checked lines (-v) and lines (-vv)"""
     if gpar.loglevel > logging.WARNING:
         return ''
     if gpar.loglevel > logging.INFO:
-        return ', %d lines checked%s' % (checked, suffix)
-    return ', %d of %d lines checked%s' % (checked, nlines, suffix)
+        return ', %s checked%s' % (plural(checked, 'line'), suffix)
+    return ', %d of %s checked%s' % (checked, plural(nlines, 'line'), suffix)
 
 
 def describe_plan(args):
@@ -870,10 +874,9 @@ def describe_plan(args):
             dirs = sum(1 for path in matched if os.path.isdir(path))
             what = []
             if len(matched) > dirs:
-                what.append('checking %d file%s' % (len(matched) - dirs,
-                            's' if len(matched) - dirs > 1 else ''))
+                what.append('checking %s' % plural(len(matched) - dirs, 'file'))
             if dirs:
-                what.append('searching %d folder%s%s' % (dirs, 's' if dirs > 1 else '',
+                what.append('searching %s%s' % (plural(dirs, 'folder'),
                             ' and all folders below them'
                             if gpar.recursive else ' (no subfolders, use -r)'))
             log.info('pattern %s: %s', arg, ' and '.join(what))
@@ -944,12 +947,12 @@ def process(args):
                 except YearError as e:
                     log.error('%s: year of syslog timestamps cannot be validated: %s, '
                               'use -y to set the starting year', fpath, e)
-                    ret = 2
+                    ret = 3
                     continue
                 # -v: checked lines, -vv: all files and their number of lines
                 if count or gpar.loglevel <= logging.INFO:
-                    stderr('%s: %d backward steps%s' % (fpath, count,
-                                                         fmt_checked(checked, nlines)))
+                    stderr('%s: %s%s' % (fpath, plural(count, 'backward step'),
+                                         fmt_checked(checked, nlines)))
                 total += count
                 total_checked += checked
                 total_lines += nlines
@@ -958,10 +961,10 @@ def process(args):
             # EOFError, LZMAError, TarError: truncated or corrupt compressed file
             log.error('%s: %s%s', path, e,
                       ' (run as root?)' if isinstance(e, PermissionError) else '')
-            ret = 2
+            ret = 3
 
-    stderr('total: %d backward steps%s' % (
-           total, fmt_checked(total_checked, total_lines, ' in %d files' % nfiles)))
+    stderr('total: %s%s' % (plural(total, 'backward step'),
+           fmt_checked(total_checked, total_lines, ' in %s' % plural(nfiles, 'file'))))
     if total and not ret:
         ret = 1
     return ret
@@ -978,7 +981,7 @@ def main(argv = None):
              'max', 'prev', 'recursive', 'summary', 'threshold=', 'year=')
         )
     except getopt.error as msg:
-        exit(1, msg, True)
+        exit(2, msg, True)
 
     for opt, par in optlist:
         if opt in ('-h', '--help'):
@@ -1010,26 +1013,26 @@ def main(argv = None):
             try:
                 gpar.threshold = timedelta(seconds = float(par))
             except ValueError:
-                exit(1, 'invalid threshold: %s' % par, True)
+                exit(2, 'invalid threshold: %s' % par, True)
         elif opt in ('-y', '--year'):
             try:
                 gpar.year = int(par)
                 datetime(gpar.year, 1, 1)
             except ValueError:
-                exit(1, 'invalid year: %s' % par, True)
+                exit(2, 'invalid year: %s' % par, True)
 
     if not args:
         if gpar.live:
             args = [LIVE_DIR]
         elif not gpar.journal:
-            exit(1, 'no path given', True)
+            exit(2, 'no path given', True)
 
     setup_logging(gpar.logfile, gpar.loglevel)
 
     try:
         return process(args)
     except KeyboardInterrupt:
-        return 3    # interrupted (Ctrl-C)
+        return 4    # interrupted (Ctrl-C)
 
 
 if __name__ == '__main__':
