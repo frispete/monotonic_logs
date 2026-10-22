@@ -7,6 +7,7 @@
 #
 
 import io
+import logging
 import os
 import time
 import gzip
@@ -1130,6 +1131,66 @@ class TestCollectFiles(unittest.TestCase):
     def test_unmatched_is_kept(self):
         self.assertEqual(ml.collect_files(['/nonexistent/messages.txt']),
                          ['/nonexistent/messages.txt'])
+
+
+class TestPlan(GparMixin, unittest.TestCase):
+    """-vv: brief messages about what will be done"""
+
+    def plan(self, *args):
+        gpar.loglevel = logging.INFO
+        with self.assertLogs(ml.log, 'INFO') as cm:
+            ml.describe_plan(list(args))
+        return [m.split(':', 2)[2] for m in cm.output]
+
+    def test_quiet_without_vv(self):
+        gpar.loglevel = logging.WARNING
+        with self.assertRaises(AssertionError):
+            with self.assertLogs(ml.log, 'INFO'):
+                ml.describe_plan([TESTDATA])
+
+    def test_folder(self):
+        gpar.threshold = timedelta(seconds = 0.25)
+        plan = self.plan(TESTDATA)
+        self.assertEqual(plan[0], 'searching folder %s (no subfolders, use -r)' % TESTDATA)
+        self.assertTrue(plan[1].startswith('looking for messages*.txt, '), plan[1])
+        self.assertIn('skipping rotated logs (use -R)', plan)
+        self.assertIn('comparing each line against the previous one', plan)
+        self.assertIn('reporting backward steps >= 0.25 s (+1 s for whole seconds)', plan)
+        self.assertEqual(plan[-1], 'syslog year: derived from full timestamps '
+                                   'and file or folder names')
+
+    def test_live_options(self):
+        gpar.live = gpar.recursive = gpar.rotated = gpar.all_files = True
+        gpar.journal = gpar.against_max = gpar.show_prev = gpar.summary = True
+        gpar.year = 2023
+        plan = self.plan(LIVE)
+        self.assertEqual(plan[0], 'searching folder %s and all folders below it' % LIVE)
+        self.assertTrue(plan[1].startswith('looking for messages, messages-*, '), plan[1])
+        self.assertTrue(plan[1].endswith(' and any other file with at least 5 '
+                                         'timestamped lines'), plan[1])
+        for msg in ('including rotated logs',
+                    'skipping tar archives in folders (snapshots, not live logs)',
+                    'checking all supportconfig sections with at least 5 timestamped lines',
+                    'checking the systemd journal, each boot separately',
+                    'comparing each line against the highest timestamp so far',
+                    'reporting all backward steps',
+                    'printing only the largest step per file, with count and sum',
+                    'printing the reference line before each step',
+                    'syslog year: starting with 2023'):
+            self.assertIn(msg, plan)
+
+    def test_files_and_patterns(self):
+        msgs = data('messages.txt')
+        plan = self.plan(msgs, data('messages-2024*'), os.path.join(TESTDATA, 's*'),
+                         data('nothere'))
+        self.assertEqual(plan[:4], [
+            'checking file %s' % msgs,
+            'pattern %s: checking 4 files' % data('messages-2024*'),
+            'pattern %s: searching 1 folder (no subfolders, use -r)'
+            % os.path.join(TESTDATA, 's*'),
+            'checking file %s (not found)' % data('nothere')])
+        # folder lines only with a folder search
+        self.assertFalse([m for m in self.plan(msgs) if m.startswith('looking for')])
 
 
 class TestMain(GparMixin, unittest.TestCase):

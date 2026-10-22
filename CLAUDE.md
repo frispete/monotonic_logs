@@ -116,6 +116,13 @@ timestamp is earlier than its reference timestamp.
     checked sections) to both, and `in <n> files` to the total; `-vv` lists
     every checked file and shows `<checked> of <lines> lines checked`
     (`fmt_checked()`; files that failed are not counted).
+  - `-vv` also logs (INFO) brief, informal messages about what will be done
+    after the `started` message (`describe_plan()`, from `gpar` and the
+    path arguments): one line per path argument (folder, archive, file,
+    glob pattern; no line per subfolder), the patterns, rotated logs and
+    archives in folders (only with a folder or archive search), `-a`, `-j`,
+    comparison, threshold, `-s` / `-p` and the year source. Hints for options
+    that silently leave files out: `(use -r)`, `(use -R)`.
   - Warnings `<file>:<lineno>: warning: ...` if a derived syslog year is
     inconsistent with a full timestamp (that year is used) or the
     file/directory name date, or (with `-y`) gives Feb 29 in a non-leap year
@@ -135,7 +142,7 @@ timestamp is earlier than its reference timestamp.
   -h, --help            usage
   -V, --version         print version and exit
   -v, --verbose         verbose (cumulative: -v warning + checked lines,
-                        -vv info + all files with lines, -vvv debug)
+                        -vv info + plan + all files with lines, -vvv debug)
   -l, --logfile=fname   log to this file (default and `-`: stderr)
   -a, --all             also search directories for all other files with
                         logs, and check all sections with logs
@@ -260,7 +267,7 @@ option `-R` for rotated logs (0.12), default threshold 0.25 s plus
 resolution of whole seconds (0.13), checked lines with `-v` / `-vv` (0.14), tar archives (0.15), warn and localmessages
 sections (0.16), systemd journal `-j` (0.17), one step per run below the
 maximum with `-m` (0.18), archives not scanned by `-a`, wider
-`SCC_DATE_RE` (0.19).
+`SCC_DATE_RE` (0.19), plan messages with `-vv` (0.20).
 
 1. Possible: restrict `-j` to selected boots (all boots are checked now).
 

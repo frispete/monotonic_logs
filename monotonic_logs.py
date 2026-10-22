@@ -8,8 +8,9 @@ Usage: %(appname)s [-hVvajLmpRrs][-t secs][-y year][-l log] [path...]
        -h, --help           this message
        -V, --version        print version and exit
        -v, --verbose        verbose mode (cumulative): -v adds the number of
-                            checked lines, -vv lists every checked file
-                            with its number of lines
+                            checked lines, -vv describes what will be done
+                            and lists every checked file with its number
+                            of lines
        -l, --logfile=fname  log to this file
        -a, --all            search directories for all files with logs, and
                             check all sections with logs (see Notes)
@@ -123,7 +124,7 @@ License:
 # vim:set et ts=8 sw=4:
 #
 
-__version__ = '0.19'
+__version__ = '0.20'
 __author__ = 'Hans-Peter Jansen <hpj@urpla.net>'
 __license__ = 'GNU GPL v2 - see http://www.gnu.org/licenses/gpl2.txt for details'
 
@@ -847,9 +848,73 @@ def fmt_checked(checked, nlines, suffix = ''):
     return ', %d of %d lines checked%s' % (checked, nlines, suffix)
 
 
+def describe_plan(args):
+    """Log brief, informal messages about what will be done (-vv)"""
+    if gpar.loglevel > logging.INFO:
+        return
+    searched = False
+    for arg in args:
+        if os.path.isdir(arg):
+            log.info('searching folder %s%s', arg, ' and all folders below it'
+                     if gpar.recursive else ' (no subfolders, use -r)')
+            searched = True
+            continue
+        matched = sorted(glob.glob(arg))
+        if not os.path.exists(arg) and matched:
+            dirs = sum(1 for path in matched if os.path.isdir(path))
+            what = []
+            if len(matched) > dirs:
+                what.append('checking %d file%s' % (len(matched) - dirs,
+                            's' if len(matched) - dirs > 1 else ''))
+            if dirs:
+                what.append('searching %d folder%s%s' % (dirs, 's' if dirs > 1 else '',
+                            ' and all folders below them'
+                            if gpar.recursive else ' (no subfolders, use -r)'))
+            log.info('pattern %s: %s', arg, ' and '.join(what))
+            searched = searched or dirs > 0 or any(map(is_archive, matched))
+        elif not os.path.exists(arg):
+            log.info('checking file %s (not found)', arg)
+        elif is_archive(arg):
+            log.info('reading archive %s%s', arg, ', all folders' if gpar.recursive
+                     else ', its top level folder only (use -r)')
+            searched = True
+        else:
+            log.info('checking file %s', arg)
+    if searched:
+        log.info('looking for %s%s', ', '.join(LIVE_PATTERNS if gpar.live else DIR_PATTERNS),
+                 ' and any other file with at least %d timestamped lines' % MIN_RUN
+                 if gpar.all_files else '')
+        log.info('including rotated logs' if gpar.rotated
+                 else 'skipping rotated logs (use -R)')
+        log.info('skipping tar archives in folders (snapshots, not live logs)' if gpar.live
+                 else 'reading tar archives in folders, unless extracted next to them')
+    if gpar.all_files:
+        log.info('checking all supportconfig sections with at least %d timestamped lines',
+                 MIN_RUN)
+    if gpar.journal:
+        log.info('checking the systemd journal, each boot separately')
+    log.info('comparing each line against the highest timestamp so far' if gpar.against_max
+             else 'comparing each line against the previous one')
+    if gpar.threshold:
+        log.info('reporting backward steps >= %g s (+%g s for whole seconds)',
+                 gpar.threshold.total_seconds(), RESOLUTION.total_seconds())
+    else:
+        log.info('reporting all backward steps')
+    if gpar.summary:
+        log.info('printing only the largest step per file, with count and sum')
+    if gpar.show_prev:
+        log.info('printing the reference line before each step')
+    if gpar.year:
+        log.info('syslog year: starting with %d', gpar.year)
+    else:
+        log.info('syslog year: derived from full timestamps and file or folder names%s',
+                 ', file time stamps as last resort' if gpar.live else '')
+
+
 def process(args):
     ret = 0
     log.info('started with pid %s in %s', os.getpid(), gpar.appdir)
+    describe_plan(args)
 
     files = collect_files(args)
     if gpar.journal:
