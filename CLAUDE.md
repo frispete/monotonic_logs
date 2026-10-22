@@ -68,8 +68,20 @@ timestamp is earlier than its reference timestamp.
   These files have no `#==[` headers, so they are processed completely.
   Only with `-L` the file mtime is a (last resort) year source. Permission
   errors keep exit code 2, with the hint `(run as root?)`.
-- Files ending in `.gz` / `.xz` are read via `gzip` / `lzma` (`OPENERS`,
-  by extension). Corrupt or truncated archives count as unreadable (exit 2).
+- Compressed files are read via `gzip` / `lzma`, detected by magic bytes
+  (`MAGICS`, `opener()`, `decompress()`), not by extension (real data has
+  gzip files named `.txz`). `COMPRESSED_EXTS` is only used to strip
+  extensions for name checks. Corrupt or truncated files count as
+  unreadable (exit 2, `READ_ERRORS`).
+- Tar archives (`ARCHIVE_EXTS`: `.txz`, `.tar.xz`, `.tgz`, `.tar.gz`,
+  `.tar`; `is_archive()` also checks the content) are read in one streaming
+  pass (`archive_logs()`, `tarfile` mode `r|*`), never extracted. Members are
+  selected like directory files (patterns, `-R`, `-a`; without `-r` only
+  depth <= 1, i.e. the `scc_*/` directory), named `<archive>/<member>`, so
+  `ref_date()` finds the `scc_*` date; `-L` uses the member mtime
+  (`MEMBER_MTIMES`). A truncated archive reports the members read so far,
+  then exit 2. Directory searches skip archives whose extracted directory
+  exists next to them, and all archives with `-L`.
 - Each file is checked independently.
 
 ## Output and exit codes
@@ -125,7 +137,7 @@ timestamp is earlier than its reference timestamp.
                         sections), required if it cannot be validated
 ```
 
-`path` may be a file, a glob pattern (which may also match directories), or
+`path` may be a file, a tar archive, a glob pattern (which may also match directories), or
 a directory (`dir_files()`, with `-r` for each directory of the tree; searched for
 `DIR_PATTERNS`: `messages*.txt`, `messages*.gz`, `messages*.xz`, `boot.txt`,
 `boot.txt.gz`, `boot.txt.xz`). With `-a`, also all other non-binary regular
@@ -218,7 +230,7 @@ syslog year derivation (0.2), option `-y` (0.3), boot.txt sections (0.4), compre
 sections, quiet zero lines, cumulated delta in `-s` (0.9), option `-r`
 (0.10), option `-L` for live systems and time since boot timestamps (0.11),
 option `-R` for rotated logs (0.12), default threshold 0.25 s plus
-resolution of whole seconds (0.13), checked lines with `-v` / `-vv` (0.14).
+resolution of whole seconds (0.13), checked lines with `-v` / `-vv` (0.14), tar archives (0.15).
 
 1. Option `-j` (discuss first): check the systemd journal of a live system
    via `journalctl --no-pager -o short-iso-precise` (subprocess, stdlib),

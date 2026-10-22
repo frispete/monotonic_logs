@@ -12,6 +12,7 @@ import time
 import gzip
 import lzma
 import shutil
+import tarfile
 import tempfile
 import unittest
 import contextlib
@@ -785,6 +786,132 @@ class TestThreshold(CheckMixin, unittest.TestCase):
         self.assertEqual(main('-t', '0', data('messages-20240103.txt')), 1)
 
 
+class TestArchive(GparMixin, unittest.TestCase):
+    """Supportconfig tar archives (.txz etc.), read in one pass"""
+    SCC = 'scc_host1_240115_1200'
+    ISO = ['2024-01-15T10:00:%02d+01:00 host1 line %d' % (i, i) for i in range(6)]
+
+    def setUp(self):
+        GparMixin.setUp(self)
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+        GparMixin.tearDown(self)
+
+    def archive(self, name = SCC + '.txz', mode = 'w:xz', members = None, mtime = 0):
+        """Create an archive from {member name: bytes}"""
+        if members is None:
+            with open(data('messages.txt'), 'rb') as fh:
+                messages = fh.read()
+            with open(data(BOOT), 'rb') as fh:
+                boot = fh.read()
+            iso = '\n'.join(self.ISO).encode()
+            members = {
+                self.SCC + '/messages.txt': messages,
+                self.SCC + '/boot.txt': boot,
+                self.SCC + '/messages-20240103.txt': messages,
+                self.SCC + '/other.log': iso,
+                self.SCC + '/data.bin': b'\0' + iso,
+                self.SCC + '/sub/messages.txt': messages,
+                'top/messages.txt.gz': gzip.compress(messages),
+            }
+        path = os.path.join(self.tmpdir, name)
+        with tarfile.open(path, mode) as tar:
+            for mname, content in members.items():
+                info = tarfile.TarInfo(mname)
+                info.size, info.mtime = len(content), mtime
+                tar.addfile(info, io.BytesIO(content))
+        return path
+
+    def run_main(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            ret = ml.main(list(argv))
+        return ret, out.getvalue().splitlines(), err.getvalue().splitlines()
+
+    def members(self, path):
+        return [os.path.relpath(p, path) for p, _ in ml.archive_logs(path)]
+
+    def test_is_archive(self):
+        self.assertTrue(ml.is_archive(self.archive()))
+        self.assertTrue(ml.is_archive(self.archive('x.tgz', 'w:gz')))
+        self.assertTrue(ml.is_archive(self.archive('x.tar', 'w')))
+        self.assertFalse(ml.is_archive(data('messages.txt')))
+        plain = os.path.join(self.tmpdir, 'messages.txz')
+        with lzma.open(plain, 'wb') as fh:
+            fh.write(b'2024-01-15T10:00:00Z x\n')
+        self.assertFalse(ml.is_archive(plain))
+
+    def test_member_selection(self):
+        path = self.archive()
+        scc = self.SCC + '/'
+        self.assertEqual(self.members(path), [scc + 'messages.txt', scc + 'boot.txt',
+                                              'top/messages.txt.gz'])
+        gpar.rotated = True
+        self.assertIn(scc + 'messages-20240103.txt', self.members(path))
+        gpar.all_files = True
+        self.assertIn(scc + 'other.log', self.members(path))
+        self.assertNotIn(scc + 'data.bin', self.members(path))
+        self.assertNotIn(scc + 'sub/messages.txt', self.members(path))
+        gpar.recursive = True
+        self.assertIn(scc + 'sub/messages.txt', self.members(path))
+
+    def test_same_results_as_files(self):
+        path = self.archive()
+        ret, out, err = self.run_main('-t', '0', path)
+        self.assertEqual(ret, 1)
+        member = os.path.join(path, self.SCC)
+        self.assertEqual(out[0].split('\t')[0], os.path.join(member, 'messages.txt') + ':12')
+        # boot.txt: journalctl year from the scc directory of the member
+        self.assertEqual([l.split('\t')[0] for l in out if 'boot.txt' in l],
+                         [os.path.join(member, 'boot.txt:%d' % n) for n in (23, 39, 46)])
+        self.assertEqual(err[-1], 'total: 7 backward steps')
+
+    def test_gzip_named_txz(self):
+        path = self.archive(mode = 'w:gz')
+        self.assertEqual(self.run_main('-t', '0', path)[2][-1], 'total: 7 backward steps')
+
+    def test_compressed_text_named_txz(self):
+        path = os.path.join(self.tmpdir, 'messages.txz')
+        with lzma.open(path, 'wb') as fh:
+            fh.write(b'2024-01-15T10:00:01Z a\n2024-01-15T10:00:00Z b\n')
+        self.assertEqual(self.run_main(path)[1], [path + ':2\t-00:00:01.000000\t'
+                                                  '2024-01-15T10:00:00Z b'])
+
+    def test_truncated(self):
+        path = self.archive()
+        with open(path, 'rb') as fh:
+            content = fh.read()
+        with open(path, 'wb') as fh:
+            fh.write(content[:len(content) * 2 // 3])
+        with self.assertLogs(ml.log, 'ERROR') as cm:
+            ret, out, err = self.run_main('-t', '0', path)
+        self.assertEqual(ret, 2)
+        self.assertTrue(cm.output[0].startswith('ERROR:%s:%s: ' % (ml.log.name, path)),
+                        cm.output[0])
+
+    def test_directory_search(self):
+        path = self.archive()
+        self.assertEqual(ml.collect_files([self.tmpdir]), [path])
+        # an extracted archive is skipped
+        os.mkdir(os.path.join(self.tmpdir, self.SCC))
+        self.assertEqual(ml.collect_files([self.tmpdir]), [])
+        os.rmdir(os.path.join(self.tmpdir, self.SCC))
+        gpar.live = True
+        self.assertEqual(ml.collect_files([self.tmpdir]), [])
+
+    def test_live_member_mtime(self):
+        t = time.mktime(datetime(2024, 3, 1, 12, 0).timetuple())
+        path = self.archive('logs.txz', members = {
+            'log/messages': b'Feb 29 12:00:00 host1 a\nFeb 28 12:00:00 host1 backward\n'},
+            mtime = t)
+        ret, out, err = self.run_main('-L', path)
+        self.assertEqual(ret, 1)
+        self.assertEqual(out[0].split('\t')[:2],
+                         [os.path.join(path, 'log', 'messages') + ':2', '-1d 00:00:00.000000'])
+
+
 class TestCollectFiles(unittest.TestCase):
 
     def test_is_rotated(self):
@@ -905,9 +1032,11 @@ class TestMain(GparMixin, unittest.TestCase):
     def test_corrupt_compressed(self):
         tmpdir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmpdir)
-        for name, content in (('messages-20240103.txt.gz', b'not gzip'),
-                              ('messages-20240103.txt.xz', b'not xz'),
-                              ('messages-20240104.txt.gz', gzip.compress(b'Jan  1 ')[:-8])):
+        # compression is detected by content: 'not gzip' is plain text
+        for name, content in (('messages-20240103.txt.gz', b'\x1f\x8bnot gzip'),
+                              ('messages-20240103.txt.xz', b'\xfd7zXZ\x00not xz'),
+                              ('messages-20240104.txt.gz', gzip.compress(b'Jan  1 ')[:-8]),
+                              ('messages-20240104.txt.xz', lzma.compress(b'Jan  1 ' * 99)[:-20])):
             path = os.path.join(tmpdir, name)
             with open(path, 'wb') as fh:
                 fh.write(content)

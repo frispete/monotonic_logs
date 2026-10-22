@@ -32,7 +32,8 @@ Usage: %(appname)s [-hVvaLmpRrs][-t secs][-y year][-l log] path...
        -y, --year=year      year of the first traditional syslog timestamp,
                             required if it cannot be validated (see Notes)
 
-       path may be a file, a glob pattern, or a directory
+       path may be a file, a supportconfig archive (.txz, .tar.xz, .tgz,
+       .tar.gz, .tar), a glob pattern, or a directory
        (directories are searched for messages*.txt and boot.txt, and
        messages*.gz, messages*.xz, boot.txt.gz, boot.txt.xz; glob patterns
        may match directories, too; rotated logs only with -R, files given
@@ -78,14 +79,19 @@ A per file summary of files with backward steps and the total are printed
 to stderr. With -v, the number of checked lines (with timestamp) is added,
 with -vv, every checked file is listed, with its number of lines.
 Exit code: 0 = no backward steps, 1 = backward steps found,
-2 = a file could not be read (or decompressed) or its year could not be
-validated,
+2 = a file could not be read (or decompressed, e.g. a truncated archive)
+or its year could not be validated,
 3 = interrupted.
 
 Notes:
 Only the Python standard library is used, compatible with Python 3.6+ (SLES 15).
 Lines without a timestamp (continuation lines) are skipped.
-Files ending in .gz or .xz are decompressed on the fly.
+Compressed files (gzip, xz) are decompressed on the fly, detected by their
+content. Tar archives are read in one pass without extraction: their
+members are selected like files in a directory (only the archive root and
+its top level directories without -r), and reported as
+<archive>/<member>. In directory searches, archives are skipped, if their
+extracted directory exists next to them, and with -L.
 With -a, directories are also searched for all other non-binary files with
 at least 5 consecutive lines starting with a supported timestamp, and in
 files with "#==[" headers, all other sections with such lines are checked
@@ -114,7 +120,7 @@ License:
 # vim:set et ts=8 sw=4:
 #
 
-__version__ = '0.14'
+__version__ = '0.15'
 __author__ = 'Hans-Peter Jansen <hpj@urpla.net>'
 __license__ = 'GNU GPL v2 - see http://www.gnu.org/licenses/gpl2.txt for details'
 
@@ -126,6 +132,8 @@ import glob
 import gzip
 import lzma
 import getopt
+import fnmatch
+import tarfile
 import calendar
 import logging
 
@@ -218,8 +226,17 @@ ROTATED_RE = re.compile(r'(?:-(?:19|20)\d{6}(?:\.txt|\.log)?|\.\d+|\.old|^boot\.
 # minimum number of consecutive timestamped lines of a log (option -a)
 MIN_RUN = 5
 
-# openers of compressed files by extension
-OPENERS = {'.gz': gzip.open, '.xz': lzma.open}
+# extensions of compressed files, stripped for name checks
+COMPRESSED_EXTS = ('.gz', '.xz')
+# openers and decompressors of compressed data by magic bytes
+MAGICS = ((b'\x1f\x8b', gzip.open, gzip.decompress),
+          (b'\xfd7zXZ\x00', lzma.open, lzma.decompress))
+# extensions of (compressed) tar archives, e.g. scc_host1_240115_1200.txz
+ARCHIVE_EXTS = ('.txz', '.tar.xz', '.tgz', '.tar.gz', '.tar')
+# errors of reading compressed files and archives
+READ_ERRORS = (OSError, EOFError, lzma.LZMAError, tarfile.TarError)
+# modification times of archive members by path (option -L)
+MEMBER_MTIMES = {}
 
 # date of rotated files, e.g. messages-20240115.txt
 FNAME_DATE_RE = re.compile(r'-((?:19|20)\d{6})(?!\d)')
@@ -289,10 +306,27 @@ def fmt_delta(td):
     return sign + s
 
 
+def opener(path):
+    """Return the opener of a possibly compressed file, by its magic bytes"""
+    with open(path, 'rb') as fh:
+        head = fh.read(6)
+    for magic, func, _ in MAGICS:
+        if head.startswith(magic):
+            return func
+    return open
+
+
+def decompress(data):
+    """Decompress possibly compressed data, by its magic bytes"""
+    for magic, _, func in MAGICS:
+        if data.startswith(magic):
+            return func(data)
+    return data
+
+
 def open_text(path):
     """Open a possibly compressed file for reading text"""
-    opener = OPENERS.get(os.path.splitext(path)[1], open)
-    return opener(path, 'rt', encoding = 'utf-8', errors = 'replace')
+    return opener(path)(path, 'rt', encoding = 'utf-8', errors = 'replace')
 
 
 def has_log_run(lines):
@@ -310,15 +344,14 @@ def has_log_run(lines):
 
 def is_log_file(path):
     """True, if path is a non-binary file with a run of timestamped lines"""
-    opener = OPENERS.get(os.path.splitext(path)[1], open)
     try:
-        with opener(path, 'rb') as fh:
+        with opener(path)(path, 'rb') as fh:
             if b'\0' in fh.read(8192):
                 log.info('%s: binary file skipped', path)
                 return False
         with open_text(path) as fh:
             return has_log_run(fh)
-    except (OSError, EOFError, lzma.LZMAError) as e:
+    except READ_ERRORS as e:
         log.warning('%s: skipped: %s', path, e)
         return False
 
@@ -383,7 +416,10 @@ def ref_date(path):
             pass
     if gpar.live:
         # reliable on a live system only, not for copied data
-        return datetime.fromtimestamp(os.path.getmtime(path)), 'the file time stamp'
+        mtime = MEMBER_MTIMES.get(path)
+        if mtime is None:
+            mtime = os.path.getmtime(path)
+        return datetime.fromtimestamp(mtime), 'the file time stamp'
     return None, None
 
 
@@ -493,10 +529,11 @@ def print_hit(path, hit, extra = ()):
         stdout()
 
 
-def check_file(path):
+def check_file(path, lines = None):
     """Report backward timestamp steps in one file, return the number of
     (backward steps, checked lines with timestamp, lines)"""
-    lines = read_lines(path)
+    if lines is None:
+        lines = read_lines(path)
     sections = log_sections(path, lines)
     if not sections:
         log.warning('%s: no log section found', path)
@@ -589,7 +626,7 @@ def check_section(path, lines):
 def is_rotated(path):
     """True, if path is a rotated log file by its name"""
     name, ext = os.path.splitext(os.path.basename(path))
-    if ext not in OPENERS:
+    if ext not in COMPRESSED_EXTS:
         name += ext
     return bool(ROTATED_RE.search(name))
 
@@ -609,7 +646,57 @@ def dir_files(dirname):
                 found.add(path)
     if not gpar.rotated:
         found = set(path for path in found if not is_rotated(path))
+    if not gpar.live:
+        for pattern in ARCHIVE_EXTS:
+            for path in glob.glob(os.path.join(dirname, '*' + pattern)):
+                # skip archives, that are extracted next to them
+                if os.path.isdir(path[:-len(pattern)]):
+                    log.info('%s: skipped, extracted in %s', path, path[:-len(pattern)])
+                elif os.path.isfile(path):
+                    found.add(path)
     return sorted(found)
+
+
+def is_archive(path):
+    """True, if path is a (compressed) tar archive"""
+    if not path.endswith(ARCHIVE_EXTS):
+        return False
+    try:
+        return tarfile.is_tarfile(path)
+    except READ_ERRORS:
+        # reported, when the archive is read
+        return True
+
+
+def archive_logs(path):
+    """Yield (path, lines) of the log files in a tar archive, in one pass
+
+    Members are selected like files in a directory: by DIR_PATTERNS (or
+    LIVE_PATTERNS), rotated ones with -R, other logs with -a. Without -r,
+    only members in the archive root and its top level directories are
+    checked. The path of a member is archive path + "/" + member name.
+    """
+    patterns = LIVE_PATTERNS if gpar.live else DIR_PATTERNS
+    with tarfile.open(path, 'r|*') as tar:
+        for member in tar:
+            name = member.name[2:] if member.name.startswith('./') else member.name
+            if not member.isfile() or (name.count('/') > 1 and not gpar.recursive):
+                continue
+            base = os.path.basename(name)
+            if not gpar.rotated and is_rotated(base):
+                continue
+            known = any(fnmatch.fnmatchcase(base, pattern) for pattern in patterns)
+            if not known and not gpar.all_files:
+                continue
+            data = decompress(tar.extractfile(member).read())
+            if not known and b'\0' in data[:8192]:
+                continue
+            lines = data.decode('utf-8', 'replace').splitlines()
+            if not known and not has_log_run(lines):
+                continue
+            mpath = os.path.join(path, name)
+            MEMBER_MTIMES[mpath] = member.mtime
+            yield mpath, lines
 
 
 def collect_files(args):
@@ -651,25 +738,28 @@ def process(args):
     for path in files:
         log.info('processing %s', path)
         try:
-            count, checked, nlines = check_file(path)
-        except (OSError, EOFError, lzma.LZMAError) as e:
-            # EOFError, LZMAError: truncated or corrupt compressed file
+            items = archive_logs(path) if is_archive(path) else [(path, None)]
+            for fpath, lines in items:
+                try:
+                    count, checked, nlines = check_file(fpath, lines)
+                except YearError as e:
+                    log.error('%s: year of syslog timestamps cannot be validated: %s, '
+                              'use -y to set the starting year', fpath, e)
+                    ret = 2
+                    continue
+                # -v: checked lines, -vv: all files and their number of lines
+                if count or gpar.loglevel <= logging.INFO:
+                    stderr('%s: %d backward steps%s' % (fpath, count,
+                                                         fmt_checked(checked, nlines)))
+                total += count
+                total_checked += checked
+                total_lines += nlines
+                nfiles += 1
+        except READ_ERRORS as e:
+            # EOFError, LZMAError, TarError: truncated or corrupt compressed file
             log.error('%s: %s%s', path, e,
                       ' (run as root?)' if isinstance(e, PermissionError) else '')
             ret = 2
-            continue
-        except YearError as e:
-            log.error('%s: year of syslog timestamps cannot be validated: %s, '
-                      'use -y to set the starting year', path, e)
-            ret = 2
-            continue
-        # -v: checked lines, -vv: all files and their number of lines
-        if count or gpar.loglevel <= logging.INFO:
-            stderr('%s: %d backward steps%s' % (path, count, fmt_checked(checked, nlines)))
-        total += count
-        total_checked += checked
-        total_lines += nlines
-        nfiles += 1
 
     stderr('total: %d backward steps%s' % (
            total, fmt_checked(total_checked, total_lines, ' in %d files' % nfiles)))
