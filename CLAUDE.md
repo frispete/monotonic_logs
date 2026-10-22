@@ -19,13 +19,16 @@ timestamp is earlier than its reference timestamp.
     independently:
     - `#==[ Log File ]===...#` followed by `# /var/log/messages`
     - `#==[ Command ]===...#` followed by `# {/usr,}/bin/journalctl ...` with
-      `--no-pager` and any `--boot` form (`--boot 0`, `--boot=-1`), but not
-      `--disk-usage` / `--list-boot`
+      `--no-pager` and any `--boot` (`--boot 0`, `--boot=-1`) or `--output` /
+      `-o` form (e.g. `--output=short-iso | egrep ... | tail -500`), but not
+      `--disk-usage` / `--list-boot`. Options are only looked up before the
+      first `|`. Such sections also appear in other files, e.g. `x.txt`
+      (not in `DIR_PATTERNS`, found with `-a` or when given explicitly).
     - `#==[ Command ]===...#` followed by `# {/usr,}/bin/dmesg ... -T`
   - With `-a`, any other `#==[` section with a run of `MIN_RUN` (5)
     consecutive timestamped lines is checked as well.
   - A section ends at the next `#==[` header line or EOF. A file with headers
-    but no such section gives a warning.
+    but no such section gives a `log.warning()` (visible with `-v`).
   - Files without any `#==[` header (e.g. `messages-yyyymmdd.txt`) are
     processed completely.
 - Supported timestamp formats:
@@ -37,7 +40,7 @@ timestamp is earlier than its reference timestamp.
     the first syslog line of a section comes from `-y`, or else is counted
     backwards from the first full (RFC3339 or dmesg) timestamp, or from the
     date in the file name (`messages-yyyymmdd.txt`) or supportconfig
-    directory name (`[prefix_]scc_<host>_yymmdd_hhmm`); from there years are
+    directory name (`[prefix_]scc_<host>_yymmdd_hhmm[_<uuid>]`); from there years are
     counted forwards and resynced at each full timestamp. The file mtime is
     deliberately not used (unreliable).
   - Without `-y`, a file is skipped with an error (exit 2) if no year source
@@ -53,10 +56,12 @@ timestamp is earlier than its reference timestamp.
 - stdout, one tab separated line per backward step:
   `<file>:<lineno>\t<negative delta>\t<log line>`; with `-s` only the largest
   step per file (first on ties, files without steps print nothing):
-  `<file>:<lineno>\t<negative delta>\t<count>\t<log line>`. With `-p` the
+  `<file>:<lineno>\t<negative delta>\t<count>\t<cumulated delta>\t<log line>`
+  (cumulated delta: sum of all backward steps of the file). With `-p` the
   reference line is printed before each printed step, followed by an empty
   line.
-- stderr: per file summary and total, and warnings
+- stderr: per file summary (`0 backward steps` lines only with `-v`), the
+  total (always), and warnings
   (`<file>:<lineno>: warning: ...`) if a derived syslog year is inconsistent
   with a full timestamp (that year is used) or the file/directory name date, or
   (with `-y`) gives Feb 29 in a non-leap year (line skipped). Warnings don't
@@ -81,7 +86,8 @@ timestamp is earlier than its reference timestamp.
                         logs, and check all sections with logs
   -m, --max             compare against highest timestamp seen so far
   -p, --prev            print the reference line before each hit
-  -s, --summary         print only the largest backward step per file
+  -s, --summary         print only the largest backward step per file,
+                        with the number and sum of backward steps
   -t, --threshold=secs  report only backward steps >= secs
   -y, --year=year       year of the first syslog timestamp (all files and
                         sections), required if it cannot be validated
@@ -172,10 +178,9 @@ The script follows the author's standard skeleton. Keep it intact:
 ## Suggested next steps
 
 Done: synthetic test data, unit tests, Python 3.6 verification (3.6.15),
-syslog year derivation (0.2), option `-y` (0.3), boot.txt sections (0.4), compressed input (0.5), summary option `-s` (0.6), option `-a` (0.7), cached tzinfo in `parse_iso()` (0.8, ~30% faster).
+syslog year derivation (0.2), option `-y` (0.3), boot.txt sections (0.4), compressed input (0.5), summary option `-s` (0.6), option `-a` (0.7), cached tzinfo in `parse_iso()` (0.8, ~30% faster), journalctl `--output`
+sections, quiet zero lines, cumulated delta in `-s` (0.9).
 
-1. Performance: on a 771 MB supportconfig directory (~13 s), the remaining
-   time is mostly `datetime` construction in `parse_iso()` and the
-   `check_section()` loop. Comparing raw RFC3339 strings with equal offsets
-   would be faster, but more complex; discuss first.
+Further performance work (e.g. comparing raw RFC3339 strings) was considered
+and rejected as not worth the complexity (~13 s for a 771 MB supportconfig).
 

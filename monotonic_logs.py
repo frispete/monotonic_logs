@@ -15,7 +15,7 @@ Usage: %(appname)s [-hVvamps][-t secs][-y year][-l log] path...
                             instead of the previous line
        -p, --prev           print the reference line before each hit
        -s, --summary        print only the largest backward step per file,
-                            with the number of backward steps
+                            with the number and sum of backward steps
        -t, --threshold=secs report only backward steps >= secs (default: 0)
        -y, --year=year      year of the first traditional syslog timestamp,
                             required if it cannot be validated (see Notes)
@@ -34,6 +34,10 @@ Files with supportconfig "#==[" headers are checked in these sections:
     # /usr/bin/journalctl --no-pager --boot 0     (any --boot argument)
 
     #==[ Command ]======================================#
+    # /usr/bin/journalctl --no-pager --output=short-iso | ...
+                                                  (any --output or -o)
+
+    #==[ Command ]======================================#
     # /bin/dmesg -T
 
 A section ends at the next "#==[" header, each section is checked
@@ -48,9 +52,11 @@ Supported timestamp formats:
 For each backward step, one tab separated line is printed to stdout:
     <file>:<lineno>  <negative delta>  <log line>
 With -s, only the largest step of each file with backward steps:
-    <file>:<lineno>  <negative delta>  <number of backward steps>  <log line>
+    <file>:<lineno>  <negative delta>  <number of backward steps>
+        <cumulated negative delta>  <log line>
 
-A per file summary and the total are printed to stderr.
+A per file summary (files without backward steps only in verbose mode)
+and the total are printed to stderr.
 Exit code: 0 = no backward steps, 1 = backward steps found,
 2 = a file could not be read (or decompressed) or its year could not be
 validated,
@@ -88,7 +94,7 @@ License:
 # vim:set et ts=8 sw=4:
 #
 
-__version__ = '0.8'
+__version__ = '0.9'
 __author__ = 'Hans-Peter Jansen <hpj@urpla.net>'
 __license__ = 'GNU GPL v2 - see http://www.gnu.org/licenses/gpl2.txt for details'
 
@@ -138,9 +144,11 @@ COMMAND_RE = re.compile(r'^#==\[\s*Command\s*\]=+#?\s*$')
 # (section header, following line) of log sections
 LOG_SECTIONS = (
     (LOGFILE_RE, re.compile(r'^#\s*/var/log/messages\b')),
+    # journalctl options are only looked up before a pipe
     (COMMAND_RE, re.compile(r'^#\s*(?:/usr)?/bin/journalctl'
-                            r'(?=.*\s--no-pager\b)(?=.*\s--boot\b)'
-                            r'(?!.*\s--(?:disk-usage|list-boots?)\b)')),
+                            r'(?=[^|]*\s--no-pager\b)'
+                            r'(?=[^|]*\s(?:--boot|--output|-o)\b)'
+                            r'(?![^|]*\s--(?:disk-usage|list-boots?)\b)')),
     (COMMAND_RE, re.compile(r'^#\s*(?:/usr)?/bin/dmesg\s(?:.*\s)?-T\b')),
 )
 
@@ -176,8 +184,10 @@ OPENERS = {'.gz': gzip.open, '.xz': lzma.open}
 
 # date of rotated files, e.g. messages-20240115.txt
 FNAME_DATE_RE = re.compile(r'-((?:19|20)\d{6})(?!\d)')
-# collection date of supportconfig directories, e.g. scc_host1_240115_1200
-SCC_DATE_RE = re.compile(r'(?:^|_)scc_.+_(\d{6})_\d{4}$')
+# collection date of supportconfig directories, e.g. scc_host1_240115_1200,
+# optionally with an UUID suffix
+SCC_DATE_RE = re.compile(r'(?:^|_)scc_.+_(\d{6})_\d{4}'
+                         r'(?:_[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})?$')
 
 
 def exit(ret = 0, msg = None, usage = False):
@@ -421,16 +431,16 @@ def assign_years(path, entries):
                    ref_source, source, year))
 
 
-def print_hit(path, hit, extra = None):
-    """Print a backward step, optionally preceded by its reference line"""
+def print_hit(path, hit, extra = ()):
+    """Print a backward step with extra columns, optionally preceded by its
+    reference line"""
     no, delta, line, prev_no, prev_line = hit
     fdelta = fmt_delta(delta)
     if gpar.show_prev:
         stdout('%s:%d\t%s\t%s%s' % (path, prev_no, ' ' * len(fdelta),
-                                    '\t' if extra is not None else '', prev_line))
-    if extra is not None:
-        line = '%s\t%s' % (extra, line)
-    stdout('%s:%d\t%s\t%s' % (path, no, fdelta, line))
+                                    '\t' * len(extra), prev_line))
+    stdout('%s:%d\t%s\t%s' % (path, no, fdelta,
+                              ''.join('%s\t' % col for col in extra) + line))
     if gpar.show_prev:
         stdout()
 
@@ -439,7 +449,7 @@ def check_file(path):
     """Report backward timestamp steps in one file, return their count"""
     sections = log_sections(path)
     if not sections:
-        stderr('%s: warning: no log section found' % path)
+        log.warning('%s: no log section found', path)
     hits = []
     for section in sections:
         hits.extend(check_section(path, section))
@@ -447,7 +457,9 @@ def check_file(path):
     if gpar.summary:
         if hits:
             # largest step, the first one on ties
-            print_hit(path, min(hits, key = lambda hit: hit[1]), len(hits))
+            cumulated = sum((hit[1] for hit in hits), timedelta(0))
+            print_hit(path, min(hits, key = lambda hit: hit[1]),
+                      (len(hits), fmt_delta(cumulated)))
     else:
         for hit in hits:
             print_hit(path, hit)
@@ -545,7 +557,8 @@ def process(args):
                       'use -y to set the starting year', path, e)
             ret = 2
             continue
-        stderr('%s: %d backward steps' % (path, count))
+        if count or gpar.loglevel < logging.ERROR:
+            stderr('%s: %d backward steps' % (path, count))
         total += count
 
     stderr('total: %d backward steps' % total)

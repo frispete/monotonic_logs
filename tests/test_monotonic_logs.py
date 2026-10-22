@@ -27,6 +27,8 @@ TESTDATA = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 
 
 BOOT = os.path.join('scc_host1_240115_1200', 'boot.txt')
+BOOT_HITS = (3, [(23, '-00:00:01.000000'), (39, '-00:00:01.000000'),
+                 (46, '-00:00:02.000000')])
 
 
 def data(name):
@@ -150,9 +152,10 @@ class TestLogSections(unittest.TestCase):
 
     def test_boot_sections(self):
         sections = ml.log_sections(data(BOOT))
-        # journalctl --boot 0, --boot=-1 and dmesg -T, the last up to EOF
+        # journalctl --boot 0, --boot=-1, dmesg -T and journalctl --output,
+        # the last up to EOF
         self.assertEqual([(sec[0][0], sec[-1][0]) for sec in sections],
-                         [(21, 28), (31, 34), (37, 40)])
+                         [(21, 28), (31, 34), (37, 41), (44, 46)])
 
     def test_section_header_variants(self):
         def match(line):
@@ -161,6 +164,11 @@ class TestLogSections(unittest.TestCase):
         for line in ('# /usr/bin/journalctl --no-pager --boot 0',
                      '# /usr/bin/journalctl --no-pager --boot=-1',
                      '# /bin/journalctl --boot --no-pager',
+                     '# /usr/bin/journalctl --no-pager --output=short-iso',
+                     '# /usr/bin/journalctl --no-pager --output short-iso | tail -5',
+                     '# /usr/bin/journalctl -o short-iso --no-pager',
+                     "# /usr/bin/journalctl --no-pager --output=short-iso | "
+                     "egrep -e 'gnome|gdm|plasma|kde' | tail -500",
                      '# /bin/dmesg -T',
                      '# /usr/bin/dmesg -T',
                      '# /usr/bin/dmesg --color=never -T'):
@@ -168,6 +176,9 @@ class TestLogSections(unittest.TestCase):
         for line in ('# /usr/bin/journalctl --boot=0 --no-pager --disk-usage',
                      '# /usr/bin/journalctl --no-pager --list-boot',
                      '# /usr/bin/journalctl --boot 0',
+                     '# /usr/bin/journalctl --no-pager | grep -o --boot',
+                     '# /usr/bin/journalctl --no-pager -u sshd',
+                     '# /usr/bin/journalctl --output=short-iso | grep --no-pager',
                      '# /usr/sbin/journalctl --no-pager --boot 0',
                      '# /bin/dmesg',
                      '# /bin/dmesg -t'):
@@ -214,16 +225,19 @@ class TestCheckFile(CheckMixin, unittest.TestCase):
     def test_summary(self):
         count, lines = self.output('messages.txt', summary = True)
         self.assertEqual(count, 2)
+        # largest step, count, sum of all steps (0.5 + 62 s)
         self.assertEqual(lines, [data('messages.txt') + ':15\t-00:01:02.000000\t2\t'
+                                 '-00:01:02.500000\t'
                                  '2024-01-15T09:59:00.000000+01:00 host1 chronyd[42]: '
                                  'backward 62s'])
 
     def test_summary_across_sections(self):
         # equal steps in two sections: the first one wins
         count, lines = self.output(BOOT, summary = True)
-        self.assertEqual(count, 2)
+        self.assertEqual(count, 3)
         self.assertEqual(len(lines), 1)
-        self.assertTrue(lines[0].startswith(data(BOOT) + ':23\t-00:00:01.000000\t2\t'))
+        self.assertTrue(lines[0].startswith(data(BOOT) + ':46\t-00:00:02.000000\t3\t'
+                                            '-00:00:04.000000\t'))
 
     def test_summary_with_prev_and_max(self):
         count, lines = self.output('messages.txt', summary = True, show_prev = True,
@@ -231,9 +245,10 @@ class TestCheckFile(CheckMixin, unittest.TestCase):
         self.assertEqual(count, 3)
         prev, hit, blank = lines
         # with -m, the reference is the maximum before the step (line 14)
-        self.assertEqual(prev, data('messages.txt') + ':14\t' + ' ' * 16 + '\t\t'
+        self.assertEqual(prev, data('messages.txt') + ':14\t' + ' ' * 16 + '\t\t\t'
                          '2024-01-15T10:00:02.000000+01:00 host1 kernel: forward')
-        self.assertTrue(hit.startswith(data('messages.txt') + ':15\t-00:01:02.000000\t3\t'))
+        self.assertTrue(hit.startswith(data('messages.txt') + ':15\t-00:01:02.000000\t3\t'
+                                       '-00:01:02.700000\t'))
         self.assertEqual(blank, '')
 
     def test_summary_without_steps(self):
@@ -280,8 +295,7 @@ class TestCheckFile(CheckMixin, unittest.TestCase):
     def test_boot(self):
         # sections are independent: no step between them, year change in
         # the older boot, journalctl year from the supportconfig directory
-        self.assertEqual(self.check(BOOT),
-                         (2, [(23, '-00:00:01.000000'), (39, '-00:00:01.000000')]))
+        self.assertEqual(self.check(BOOT), BOOT_HITS)
         self.assertEqual(self.warnings, [])
 
     def test_monotonic(self):
@@ -318,6 +332,9 @@ class TestYear(CheckMixin, unittest.TestCase):
         scc = (datetime(2024, 1, 15), 'the supportconfig directory name')
         self.assertEqual(ml.ref_date('/x/scc_host1_240115_1200/boot.txt'), scc)
         self.assertEqual(ml.ref_date('/x/GCP_Files_scc_host1_240115_1200/boot.txt'), scc)
+        self.assertEqual(ml.ref_date('/x/scc_SR0815_host1_240115_1200_'
+                                     '44d8fde3-496a-4b6f-bf8b-f8854f84c5f1/x.txt'), scc)
+        self.assertEqual(ml.ref_date('/x/scc_host1_240115_1200_garbage/boot.txt'), none)
         self.assertEqual(ml.ref_date('/x/notscc_host1_240115_1200/boot.txt'), none)
         self.assertEqual(ml.ref_date('/x/scc_host1_241315_1200/boot.txt'), none)
         # the file name date has precedence
@@ -343,8 +360,10 @@ class TestYear(CheckMixin, unittest.TestCase):
     def test_no_log_section(self):
         path = self.write('boot.txt', '#==[ Command ]=======#', '# /bin/uname -a',
                           'Jan  1 00:00:00 host1 not a log line')
-        self.assertEqual(self.check(path), (0, []))
-        self.assertEqual(self.warnings, ['%s: warning: no log section found' % path])
+        with self.assertLogs(ml.log, 'WARNING') as cm:
+            self.assertEqual(self.check(path), (0, []))
+        self.assertEqual(cm.output, ['WARNING:%s:%s: no log section found'
+                                     % (ml.log.name, path)])
 
     def test_no_year_source(self):
         path = self.write('messages.txt', 'Jan 15 10:00:00 host1 x')
@@ -436,8 +455,7 @@ class TestCompressed(CheckMixin, unittest.TestCase):
     def test_boot_txt_in_scc_directory(self):
         for ext in self.OPENERS:
             path = self.compress(BOOT, ext, os.path.dirname(BOOT))
-            self.assertEqual(self.check(path),
-                             (2, [(23, '-00:00:01.000000'), (39, '-00:00:01.000000')]))
+            self.assertEqual(self.check(path), BOOT_HITS)
 
     def test_collect_files(self):
         paths = [self.compress('messages-20240103.txt', '.gz'),
@@ -496,9 +514,8 @@ class TestAllFiles(CheckMixin, unittest.TestCase):
 
     def test_other_sections(self):
         # without -a, the zypper history section is not a known log section
-        self.assertEqual(self.check(self.path('zypper.txt')), (0, []))
-        self.assertEqual(self.warnings, ['%s: warning: no log section found'
-                                         % self.path('zypper.txt')])
+        with self.assertLogs(ml.log, 'WARNING'):
+            self.assertEqual(self.check(self.path('zypper.txt')), (0, []))
         # with -a it is checked, the short Command section is not
         self.assertEqual(self.check(self.path('zypper.txt'), all_files = True),
                          (1, [(6, '-01:00:02.000000')]))
@@ -570,6 +587,25 @@ class TestMain(GparMixin, unittest.TestCase):
 
     def test_backward_steps(self):
         self.assertEqual(self.main(data('messages.txt')), 1)
+
+    def stderr(self, *argv):
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            ml.main(list(argv))
+        return err.getvalue().splitlines()
+
+    def test_quiet_without_steps(self):
+        files = (data('messages-monotonic.txt'), data('messages.txt'))
+        self.assertEqual(self.stderr(*files), ['%s: 2 backward steps' % files[1],
+                                               'total: 2 backward steps'])
+        self.assertEqual(self.stderr(data('messages-monotonic.txt')),
+                         ['total: 0 backward steps'])
+
+    def test_verbose_without_steps(self):
+        with self.assertLogs(ml.log, 'INFO'):
+            lines = self.stderr('-v', data('messages-monotonic.txt'))
+        self.assertEqual(lines, ['%s: 0 backward steps' % data('messages-monotonic.txt'),
+                                 'total: 0 backward steps'])
 
     def test_summary_option(self):
         self.assertEqual(self.main('-s', data('messages.txt')), 1)
