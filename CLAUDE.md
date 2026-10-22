@@ -63,6 +63,17 @@ timestamp is earlier than its reference timestamp.
   `-yyyymmdd[.txt|.log]`, `.N`, `.old`, `boot.omsg`) are only included in
   directory searches (both modes, also `-a` extras and `-r`) with `-R`.
   Files and globs given on the command line are always checked.
+- systemd journal (`-j`): `journal_logs()` runs `journalctl --list-boots`
+  (`BOOT_RE`, with or without header line) and per boot, oldest first,
+  `journalctl --no-pager -q -o short-iso-precise -b <id>` (`short-iso` for
+  systemd < 236, probed once with `-n 0`). Each boot is a single section
+  named `journal/<boot id>`. The output is streamed (`journal_stream()`,
+  `Popen`) and checked in chunks of `CHUNK_LINES` with the comparison state
+  carried over (`check_section(..., state)`), to keep memory low (real
+  journal: 9.7M lines, 130 MB instead of 4 GB). A journalctl hint about
+  only seeing own messages gives one warning `(run as root?)`; journalctl
+  failures raise `JournalError` (an `OSError`, exit 2). `-j` needs no path;
+  it combines with paths and `-L`. Tests use a fake journalctl script.
 - Live system (`-L`): directories are searched for `LIVE_PATTERNS`
   (`messages`, `messages-*`, `warn`, `warn-*`, `localmessages`,
   `localmessages-*`, `boot.msg`, `boot.omsg`) instead of `DIR_PATTERNS`,
@@ -116,7 +127,7 @@ timestamp is earlier than its reference timestamp.
 ## Usage
 
 ```
-./monotonic_logs.py [-hVvaLmpRrs][-t secs][-y year][-l log] path...
+./monotonic_logs.py [-hVvajLmpRrs][-t secs][-y year][-l log] [path...]
   -h, --help            usage
   -V, --version         print version and exit
   -v, --verbose         verbose (cumulative: -v warning + checked lines,
@@ -124,6 +135,7 @@ timestamp is earlier than its reference timestamp.
   -l, --logfile=fname   log to this file (default and `-`: stderr)
   -a, --all             also search directories for all other files with
                         logs, and check all sections with logs
+  -j, --journal         check the systemd journal, each boot separately
   -L, --live            search a live system (LIVE_PATTERNS), path
                         defaults to /var/log
   -m, --max             compare against highest timestamp seen so far
@@ -153,7 +165,9 @@ supported timestamp (`is_log_file()`, a pre-scan with the combined
 `main()` (getopt → `gpar`) → `process()` → `collect_files()` → per file
 `check_file()` → `log_sections()` (section detection, reads whole file) →
 per section `check_section()`. `check_file()` returns
-`(backward steps, checked lines, lines)`, `check_section()` `(hits, checked)`.
+`(backward steps, checked lines, lines)`, `check_section()` `(hits, checked, state)`.
+`check_file()` accepts a list of lines (sections are detected) or a stream
+(the journal: one section, checked in chunks).
 
 - `check_section()` works in two passes: first it collects entries
   `[no, line, ts, fields, coarse]` (`ISO_RE`, then `MONO_RE`, then `DMESG_RE`, then `BSD_RE`; syslog
@@ -172,9 +186,11 @@ per section `check_section()`. `check_file()` returns
   the maximum; with `-p` the "previous" line printed is that maximum line.
 - Options are stored as class attributes on `gpar`, so they persist across
   `main()` calls. Tests must save and restore `gpar.against_max`,
-  `show_prev`, `threshold`, `year` and `loglevel` (`GparMixin` in the tests,
-  which also sets `threshold` to 0 for detection tests; the default is
-  tested in `TestThreshold`).
+  `show_prev`, `threshold`, `year`, `journal`, ... and `loglevel`. In the
+  tests, `GparMixin` saves and restores all attributes in `GPAR_ATTRS`: add
+  every new option there, a missing one leaks into later tests (a leaked
+  `journal` reads the real journal). `GparMixin` also sets `threshold` to 0
+  for detection tests; the default is tested in `TestThreshold`.
 - `check_file()` writes hits via `stdout()`. Capture `sys.stdout`
   in tests; `stdout`/`stderr` look up `sys.stdout`/`sys.stderr` at call
   time, so `contextlib.redirect_stdout` works.
@@ -233,11 +249,9 @@ sections, quiet zero lines, cumulated delta in `-s` (0.9), option `-r`
 (0.10), option `-L` for live systems and time since boot timestamps (0.11),
 option `-R` for rotated logs (0.12), default threshold 0.25 s plus
 resolution of whole seconds (0.13), checked lines with `-v` / `-vv` (0.14), tar archives (0.15), warn and localmessages
-sections (0.16).
+sections (0.16), systemd journal `-j` (0.17).
 
-1. Option `-j` (discuss first): check the systemd journal of a live system
-   via `journalctl --no-pager -o short-iso-precise` (subprocess, stdlib),
-   e.g. per boot (`--list-boots`), as separate sections.
+1. Possible: restrict `-j` to selected boots (all boots are checked now).
 
 Further performance work (e.g. comparing raw RFC3339 strings) was considered
 and rejected as not worth the complexity (~13 s for a 771 MB supportconfig).

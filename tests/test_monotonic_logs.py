@@ -11,6 +11,7 @@ import os
 import time
 import gzip
 import lzma
+import sys
 import shutil
 import tarfile
 import tempfile
@@ -42,7 +43,8 @@ def data(name):
 class GparMixin:
     """Save and restore the global parameters around each test"""
     GPAR_ATTRS = ('loglevel', 'logfile', 'against_max', 'show_prev', 'threshold',
-                  'summary', 'all_files', 'recursive', 'live', 'rotated', 'year')
+                  'summary', 'all_files', 'recursive', 'live', 'rotated', 'journal',
+                  'year')
 
     def setUp(self):
         self._gpar = dict((a, getattr(gpar, a)) for a in self.GPAR_ATTRS)
@@ -922,6 +924,120 @@ class TestArchive(GparMixin, unittest.TestCase):
         self.assertEqual(ret, 1)
         self.assertEqual(out[0].split('\t')[:2],
                          [os.path.join(path, 'log', 'messages') + ':2', '-1d 00:00:00.000000'])
+
+
+FAKE_JOURNALCTL = '''#! %(python)s
+# fake journalctl for tests, behaviour controlled by FAKE_* variables
+import os, sys
+args = sys.argv[1:]
+env = os.environ.get
+boots = {
+    '0123456789abcdef0123456789abcdef': ['2024-01-15T10:00:00%(f)s+01:00 host1 a',
+                                         '2024-01-15T10:00:02%(f)s+01:00 host1 b',
+                                         '2024-01-15T10:00:01%(f)s+01:00 host1 backward 1s',
+                                         '2024-01-15T10:00:03%(f)s+01:00 host1 c'],
+    'fedcba9876543210fedcba9876543210': ['2024-01-15T09:00:00%(f)s+01:00 host1 older? no: own boot',
+                                         '2024-01-15T09:00:05%(f)s+01:00 host1 d'],
+}
+if '--list-boots' in args:
+    if not env('FAKE_NO_HEADER'):
+        print('IDX BOOT ID                          FIRST ENTRY                  LAST ENTRY')
+    print(' -1 0123456789abcdef0123456789abcdef Mon 2024-01-15 10:00:00 CET Mon 2024-01-15 10:00:03 CET')
+    print('  0 fedcba9876543210fedcba9876543210 Mon 2024-01-15 09:00:00 CET Mon 2024-01-15 09:00:05 CET')
+elif '-n' in args:
+    sys.exit(1 if env('FAKE_OLD') and 'short-iso-precise' in args else 0)
+elif '-b' in args:
+    if env('FAKE_FAIL'):
+        sys.stderr.write('Failed to read journal\\n')
+        sys.exit(1)
+    if env('FAKE_HINT'):
+        sys.stderr.write('Hint: You are currently not seeing messages from other users.\\n')
+    fmt = args[args.index('-o') + 1]
+    for line in boots[args[args.index('-b') + 1]]:
+        print(line if fmt == 'short-iso-precise' else line.replace('%(f)s', ''))
+'''
+
+
+class TestJournal(CheckMixin, unittest.TestCase):
+    """Option -j: systemd journal via journalctl"""
+    BOOT1 = 'journal/0123456789abcdef0123456789abcdef'
+    BOOT2 = 'journal/fedcba9876543210fedcba9876543210'
+
+    def setUp(self):
+        CheckMixin.setUp(self)
+        self.tmpdir = tempfile.mkdtemp()
+        path = os.path.join(self.tmpdir, 'journalctl')
+        with open(path, 'w') as fh:
+            fh.write(FAKE_JOURNALCTL % dict(python = sys.executable, f = '.500000'))
+        os.chmod(path, 0o755)
+        patcher = mock.patch.object(ml, 'JOURNALCTL', path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for var in ('FAKE_NO_HEADER', 'FAKE_OLD', 'FAKE_FAIL', 'FAKE_HINT'):
+            self.addCleanup(os.environ.pop, var, None)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+        CheckMixin.tearDown(self)
+
+    def run_main(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            ret = ml.main(list(argv))
+        return ret, out.getvalue().splitlines(), err.getvalue().splitlines()
+
+    def test_boots(self):
+        # each boot separately: no step between the boots
+        ret, out, err = self.run_main('-j')
+        self.assertEqual(ret, 1)
+        self.assertEqual(out, [self.BOOT1 + ':3\t-00:00:01.000000\t'
+                               '2024-01-15T10:00:01.500000+01:00 host1 backward 1s'])
+        self.assertEqual(err, [self.BOOT1 + ': 1 backward steps', 'total: 1 backward steps'])
+
+    def test_list_boots_without_header(self):
+        os.environ['FAKE_NO_HEADER'] = '1'
+        self.assertEqual(self.run_main('-j', '-vv')[2][-1],
+                         'total: 1 backward steps, 6 of 6 lines checked in 2 files')
+
+    def test_old_systemd(self):
+        # short-iso: whole seconds, the 1 s step is within the resolution
+        os.environ['FAKE_OLD'] = '1'
+        self.assertEqual(self.run_main('-j', '-t', str(ml.DEFAULT_THRESHOLD))[0], 0)
+        self.assertEqual(self.run_main('-j', '-t', '0')[0], 1)
+
+    def test_hint(self):
+        os.environ['FAKE_HINT'] = '1'
+        err = self.run_main('-j')[2]
+        self.assertEqual(err.count('journal: warning: only your own messages are visible '
+                                   '(run as root?)'), 1)
+
+    def test_failure(self):
+        os.environ['FAKE_FAIL'] = '1'
+        with self.assertLogs(ml.log, 'ERROR') as cm:
+            self.assertEqual(self.run_main('-j')[0], 2)
+        self.assertIn('Failed to read journal', cm.output[0])
+
+    def test_missing_journalctl(self):
+        with mock.patch.object(ml, 'JOURNALCTL', os.path.join(self.tmpdir, 'missing')), \
+                self.assertLogs(ml.log, 'ERROR'):
+            self.assertEqual(self.run_main('-j')[0], 2)
+
+    def test_with_paths(self):
+        ret, out, err = self.run_main('-j', data('messages.txt'))
+        self.assertEqual(err[-1], 'total: 3 backward steps')
+
+    def test_chunks(self):
+        # the comparison state is carried over chunks, also the -m maximum
+        for chunk in (1, 2, 3, 100000):
+            with mock.patch.object(ml, 'CHUNK_LINES', chunk):
+                self.assertEqual(self.run_main('-j', '-m', '-vv')[2][-1],
+                                 'total: 1 backward steps, 6 of 6 lines checked in 2 files')
+                self.assertEqual(self.run_main('-j')[1][0].split('\t')[0], self.BOOT1 + ':3')
+
+    def test_no_path_needs_option(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
+            ml.main([])
+        self.assertEqual(cm.exception.code, 1)
 
 
 class TestCollectFiles(unittest.TestCase):

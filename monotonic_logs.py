@@ -4,7 +4,7 @@ Synopsis:
 Check SUSE supportconfig messages*.txt and boot.txt files for non-monotonic
 timestamps.
 
-Usage: %(appname)s [-hVvaLmpRrs][-t secs][-y year][-l log] path...
+Usage: %(appname)s [-hVvajLmpRrs][-t secs][-y year][-l log] [path...]
        -h, --help           this message
        -V, --version        print version and exit
        -v, --verbose        verbose mode (cumulative): -v adds the number of
@@ -13,6 +13,8 @@ Usage: %(appname)s [-hVvaLmpRrs][-t secs][-y year][-l log] path...
        -l, --logfile=fname  log to this file
        -a, --all            search directories for all files with logs, and
                             check all sections with logs (see Notes)
+       -j, --journal        check the systemd journal of this system, each
+                            boot separately, as journal/<boot id>
        -L, --live           search directories of a live system: messages,
                             warn, localmessages, boot.msg (with -R also
                             rotated, boot.omsg); path defaults to /var/log
@@ -32,12 +34,12 @@ Usage: %(appname)s [-hVvaLmpRrs][-t secs][-y year][-l log] path...
        -y, --year=year      year of the first traditional syslog timestamp,
                             required if it cannot be validated (see Notes)
 
-       path may be a file, a supportconfig archive (.txz, .tar.xz, .tgz,
-       .tar.gz, .tar), a glob pattern, or a directory
-       (directories are searched for messages*.txt and boot.txt, and
-       messages*.gz, messages*.xz, boot.txt.gz, boot.txt.xz; glob patterns
-       may match directories, too; rotated logs only with -R, files given
-       explicitly are always checked)
+       path is required, unless -j or -L is given; it may be a file, a
+       supportconfig archive (.txz, .tar.xz, .tgz, .tar.gz, .tar), a glob
+       pattern, or a directory (directories are searched for messages*.txt
+       and boot.txt, and messages*.gz, messages*.xz, boot.txt.gz,
+       boot.txt.xz; glob patterns may match directories, too; rotated logs
+       only with -R, files given explicitly are always checked)
 
 Description:
 Files with supportconfig "#==[" headers are checked in these sections:
@@ -120,11 +122,12 @@ License:
 # vim:set et ts=8 sw=4:
 #
 
-__version__ = '0.16'
+__version__ = '0.17'
 __author__ = 'Hans-Peter Jansen <hpj@urpla.net>'
 __license__ = 'GNU GPL v2 - see http://www.gnu.org/licenses/gpl2.txt for details'
 
 
+import io
 import os
 import re
 import sys
@@ -134,6 +137,8 @@ import lzma
 import getopt
 import fnmatch
 import tarfile
+import itertools
+import subprocess
 import calendar
 import logging
 
@@ -166,6 +171,7 @@ class gpar:
     recursive = False
     live = False
     rotated = False
+    journal = False
     year = None
 
 
@@ -238,6 +244,29 @@ ARCHIVE_EXTS = ('.txz', '.tar.xz', '.tgz', '.tar.gz', '.tar')
 READ_ERRORS = (OSError, EOFError, lzma.LZMAError, tarfile.TarError)
 # modification times of archive members by path (option -L)
 MEMBER_MTIMES = {}
+
+# systemd journal (option -j): output formats, the latter for systemd < 236
+JOURNALCTL = 'journalctl'
+JOURNAL_FORMATS = ('short-iso-precise', 'short-iso')
+# journalctl --list-boots, with or without header: " -1 <boot id> ..."
+BOOT_RE = re.compile(r'^\s*(-?\d+)\s+([0-9a-f]{32})\b')
+# journalctl hint for users, that see their own messages only
+JOURNAL_HINT = 'not seeing messages'
+# lines of a stream (the journal) checked at once
+CHUNK_LINES = 100000
+
+
+class JournalSource:
+    """Placeholder of the systemd journal in the list of files"""
+    def __str__(self):
+        return 'journal'
+
+
+JOURNAL = JournalSource()
+
+
+class JournalError(OSError):
+    """journalctl failed"""
 
 # date of rotated files, e.g. messages-20240115.txt
 FNAME_DATE_RE = re.compile(r'-((?:19|20)\d{6})(?!\d)')
@@ -535,15 +564,31 @@ def check_file(path, lines = None):
     (backward steps, checked lines with timestamp, lines)"""
     if lines is None:
         lines = read_lines(path)
-    sections = log_sections(path, lines)
-    if not sections:
-        log.warning('%s: no log section found', path)
     hits = []
     checked = 0
-    for section in sections:
-        section_hits, section_checked = check_section(path, section)
-        hits.extend(section_hits)
-        checked += section_checked
+    if isinstance(lines, list):
+        sections = log_sections(path, lines)
+        if not sections:
+            log.warning('%s: no log section found', path)
+        for section in sections:
+            section_hits, section_checked, _ = check_section(path, section)
+            hits.extend(section_hits)
+            checked += section_checked
+        nlines = len(lines)
+    else:
+        # a stream (the journal) is a single section, checked in chunks to
+        # limit the memory usage; the comparison state is carried over
+        numbered = enumerate(lines, 1)
+        state = None
+        nlines = 0
+        while True:
+            chunk = list(itertools.islice(numbered, CHUNK_LINES))
+            if not chunk:
+                break
+            nlines = chunk[-1][0]
+            chunk_hits, chunk_checked, state = check_section(path, chunk, state)
+            hits.extend(chunk_hits)
+            checked += chunk_checked
 
     if gpar.summary:
         if hits:
@@ -554,13 +599,14 @@ def check_file(path, lines = None):
     else:
         for hit in hits:
             print_hit(path, hit)
-    return len(hits), checked, len(lines)
+    return len(hits), checked, nlines
 
 
-def check_section(path, lines):
+def check_section(path, lines, state = None):
     """Return the backward timestamp steps in one log section as list of
-    (lineno, delta, line, reference lineno, reference line), and the number
-    of checked lines with timestamp"""
+    (lineno, delta, line, reference lineno, reference line), the number of
+    checked lines with timestamp, and the comparison state at its end, to
+    continue with the next chunk of a stream"""
     entries = []
     for no, line in lines:
         m = ISO_RE.match(line)
@@ -598,7 +644,7 @@ def check_section(path, lines):
 
     # with whole seconds, the resolution is added to the threshold
     coarse_threshold = gpar.threshold + RESOLUTION if gpar.threshold else gpar.threshold
-    prev_ts = prev_line = prev_no = prev_coarse = None
+    prev_ts, prev_line, prev_no, prev_coarse = state or (None, None, None, None)
     hits = []
     for no, line, ts, _, coarse in entries:
         if ts is None:
@@ -621,7 +667,8 @@ def check_section(path, lines):
                     continue
         prev_ts, prev_line, prev_no, prev_coarse = ts, line, no, coarse
 
-    return hits, sum(1 for e in entries if e[2] is not None)
+    return (hits, sum(1 for e in entries if e[2] is not None),
+            (prev_ts, prev_line, prev_no, prev_coarse))
 
 
 def is_rotated(path):
@@ -718,6 +765,59 @@ def collect_files(args):
     return files
 
 
+def journalctl(*args):
+    """Run journalctl, return (exit code, stdout lines, stderr)"""
+    proc = subprocess.run((JOURNALCTL, '--no-pager') + args,
+                          stdout = subprocess.PIPE, stderr = subprocess.PIPE)
+    return (proc.returncode, proc.stdout.decode('utf-8', 'replace').splitlines(),
+            proc.stderr.decode('utf-8', 'replace').strip())
+
+
+def journal_stream(warned, *args):
+    """Yield the stdout lines of journalctl, raise JournalError on failure"""
+    proc = subprocess.Popen((JOURNALCTL, '--no-pager') + args,
+                            stdout = subprocess.PIPE, stderr = subprocess.PIPE)
+    out = io.TextIOWrapper(proc.stdout, encoding = 'utf-8', errors = 'replace')
+    try:
+        for line in out:
+            yield line.rstrip('\n')
+    finally:
+        # also reached, if the consumer stops early
+        out.close()
+        err = proc.stderr.read().decode('utf-8', 'replace').strip()
+        proc.stderr.close()
+        ret = proc.wait()
+    if ret:
+        raise JournalError('journalctl %s: %s' % (' '.join(args), err or 'exit code %d' % ret))
+    if JOURNAL_HINT in err:
+        warn_journal_hint(warned)
+
+
+def warn_journal_hint(warned):
+    """Warn once per journal pass, that only the own messages are visible"""
+    if not warned:
+        warned.append(True)
+        stderr('journal: warning: only your own messages are visible (run as root?)')
+
+
+def journal_logs():
+    """Yield (path, line stream) per boot of the systemd journal, oldest first"""
+    ret, out, err = journalctl('--list-boots')
+    if ret:
+        raise JournalError('journalctl --list-boots: %s' % (err or 'exit code %d' % ret))
+    warned = []
+    if JOURNAL_HINT in err:
+        warn_journal_hint(warned)
+    # short-iso-precise needs systemd >= 236
+    for fmt in JOURNAL_FORMATS:
+        if journalctl('-q', '-n', '0', '-o', fmt)[0] == 0:
+            break
+        log.info('journalctl -o %s not supported', fmt)
+    for m in filter(None, map(BOOT_RE.match, out)):
+        boot = m.group(2)
+        yield 'journal/%s' % boot, journal_stream(warned, '-q', '-o', fmt, '-b', boot)
+
+
 def fmt_checked(checked, nlines, suffix = ''):
     """Format the number of checked lines (-v) and lines (-vv)"""
     if gpar.loglevel > logging.WARNING:
@@ -732,6 +832,8 @@ def process(args):
     log.info('started with pid %s in %s', os.getpid(), gpar.appdir)
 
     files = collect_files(args)
+    if gpar.journal:
+        files.append(JOURNAL)
     if not files:
         exit(1, 'no files found')
 
@@ -739,7 +841,12 @@ def process(args):
     for path in files:
         log.info('processing %s', path)
         try:
-            items = archive_logs(path) if is_archive(path) else [(path, None)]
+            if path is JOURNAL:
+                items = journal_logs()
+            elif is_archive(path):
+                items = archive_logs(path)
+            else:
+                items = [(path, None)]
             for fpath, lines in items:
                 try:
                     count, checked, nlines = check_file(fpath, lines)
@@ -775,8 +882,8 @@ def main(argv = None):
         argv = sys.argv[1:]
 
     try:
-        optlist, args = getopt.getopt(argv, 'hVvl:aLmpRrst:y:',
-            ('help', 'version', 'verbose', 'logfile=', 'all', 'rotated', 'live',
+        optlist, args = getopt.getopt(argv, 'hVvl:ajLmpRrst:y:',
+            ('help', 'version', 'verbose', 'logfile=', 'all', 'journal', 'rotated', 'live',
              'max', 'prev', 'recursive', 'summary', 'threshold=', 'year=')
         )
     except getopt.error as msg:
@@ -796,6 +903,8 @@ def main(argv = None):
             gpar.all_files = True
         elif opt in ('-R', '--rotated'):
             gpar.rotated = True
+        elif opt in ('-j', '--journal'):
+            gpar.journal = True
         elif opt in ('-L', '--live'):
             gpar.live = True
         elif opt in ('-r', '--recursive'):
@@ -819,9 +928,10 @@ def main(argv = None):
                 exit(1, 'invalid year: %s' % par, True)
 
     if not args:
-        if not gpar.live:
+        if gpar.live:
+            args = [LIVE_DIR]
+        elif not gpar.journal:
             exit(1, 'no path given', True)
-        args = [LIVE_DIR]
 
     setup_logging(gpar.logfile, gpar.loglevel)
 
