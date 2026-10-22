@@ -40,7 +40,7 @@ def data(name):
 class GparMixin:
     """Save and restore the global parameters around each test"""
     GPAR_ATTRS = ('loglevel', 'logfile', 'against_max', 'show_prev', 'threshold',
-                  'summary', 'all_files', 'recursive', 'live', 'year')
+                  'summary', 'all_files', 'recursive', 'live', 'rotated', 'year')
 
     def setUp(self):
         self._gpar = dict((a, getattr(gpar, a)) for a in self.GPAR_ATTRS)
@@ -467,8 +467,10 @@ class TestCompressed(CheckMixin, unittest.TestCase):
         paths.append(raw)
         for name in ('boot.txt.gz', 'other.gz'):
             open(os.path.join(self.tmpdir, name), 'w').close()
-        self.assertEqual(ml.collect_files([self.tmpdir]),
-                         sorted(paths + [os.path.join(self.tmpdir, 'boot.txt.gz')]))
+        current = [os.path.join(self.tmpdir, 'boot.txt.gz')]
+        self.assertEqual(ml.collect_files([self.tmpdir]), current)
+        gpar.rotated = True
+        self.assertEqual(ml.collect_files([self.tmpdir]), sorted(paths + current))
 
 
 class TestAllFiles(CheckMixin, unittest.TestCase):
@@ -512,7 +514,18 @@ class TestAllFiles(CheckMixin, unittest.TestCase):
 
     def test_collect_files_keeps_patterns(self):
         gpar.all_files = True
+        self.assertIn(data('messages-mixed.txt'), ml.collect_files([TESTDATA]))
+        self.assertNotIn(data('messages-20240302.txt'), ml.collect_files([TESTDATA]))
+        gpar.rotated = True
         self.assertIn(data('messages-20240302.txt'), ml.collect_files([TESTDATA]))
+
+    def test_rotated_extra_files(self):
+        # -a extras are subject to -R, too
+        self.write('app.log.1', *self.STEP)
+        gpar.all_files = True
+        self.assertNotIn(self.path('app.log.1'), ml.collect_files([self.tmpdir]))
+        gpar.rotated = True
+        self.assertIn(self.path('app.log.1'), ml.collect_files([self.tmpdir]))
 
     def test_other_sections(self):
         # without -a, the zypper history section is not a known log section
@@ -591,8 +604,10 @@ class TestRecursive(GparMixin, unittest.TestCase):
         # searched, not taken as file; the symlink loop is not followed
         self.assertEqual(ml.collect_files([self.tmpdir]),
                          [self.path('messages.txt'), self.path('b', 'boot.txt'),
-                          self.path('b', 'c', 'messages-20240103.txt'),
                           self.path('b', 'messages-dir.txt', 'messages.txt')])
+        gpar.rotated = True
+        self.assertIn(self.path('b', 'c', 'messages-20240103.txt'),
+                      ml.collect_files([self.tmpdir]))
 
     def test_recursive_all(self):
         gpar.recursive = gpar.all_files = True
@@ -601,7 +616,7 @@ class TestRecursive(GparMixin, unittest.TestCase):
     def test_glob_matching_directories(self):
         self.assertEqual(ml.collect_files([self.path('[ab]')]),
                          [self.path('b', 'boot.txt')])
-        gpar.recursive = True
+        gpar.recursive = gpar.rotated = True
         self.assertEqual(ml.collect_files([self.path('[ab]')]),
                          [self.path('b', 'boot.txt'),
                           self.path('b', 'c', 'messages-20240103.txt'),
@@ -620,8 +635,9 @@ class TestRecursive(GparMixin, unittest.TestCase):
 
 class TestLive(CheckMixin, unittest.TestCase):
     """Option -L: logs of a live system"""
-    FILES = ('boot.msg', 'boot.omsg', 'localmessages', 'messages',
-             'messages-20240114', 'warn')
+    FILES = ('boot.msg', 'localmessages', 'messages', 'warn')
+    ROTATED = ('boot.msg', 'boot.omsg', 'localmessages', 'messages',
+               'messages-20240114', 'warn')
 
     def live(self, *names):
         return os.path.join(LIVE, *names)
@@ -630,6 +646,8 @@ class TestLive(CheckMixin, unittest.TestCase):
         self.assertEqual(ml.collect_files([LIVE]), [])
         gpar.live = True
         self.assertEqual(ml.collect_files([LIVE]), [self.live(n) for n in self.FILES])
+        gpar.rotated = True
+        self.assertEqual(ml.collect_files([LIVE]), [self.live(n) for n in self.ROTATED])
         gpar.all_files = True
         self.assertIn(self.live('other.log'), ml.collect_files([LIVE]))
         self.assertNotIn(self.live('sub', 'messages'), ml.collect_files([LIVE]))
@@ -686,9 +704,10 @@ class TestLive(CheckMixin, unittest.TestCase):
         with mock.patch.object(ml, 'LIVE_DIR', LIVE), contextlib.redirect_stdout(out), \
                 contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(ml.main(['-L', '-s']), 1)
+            self.assertEqual(ml.main(['-L', '-s', '-R']), 1)
+        hits = [self.live('boot.msg:5'), self.live('localmessages:2'), self.live('messages:3')]
         self.assertEqual([l.split('\t')[0] for l in out.getvalue().splitlines()],
-                         [self.live('boot.msg:5'), self.live('localmessages:2'),
-                          self.live('messages:3'), self.live('messages-20240114:3')])
+                         hits + hits + [self.live('messages-20240114:3')])
 
     @unittest.skipIf(hasattr(os, 'geteuid') and os.geteuid() == 0, 'running as root')
     def test_permission_hint(self):
@@ -704,6 +723,17 @@ class TestLive(CheckMixin, unittest.TestCase):
 
 
 class TestCollectFiles(unittest.TestCase):
+
+    def test_is_rotated(self):
+        for name in ('messages-20240115.txt', 'messages-20240115.txt.xz',
+                     'messages-20240115', 'messages-20240115.xz', 'warn-20260104.txt',
+                     'zypper.log-20240115.xz', 'dnf.log.1', 'dnf.librepo.log.12',
+                     'Xorg.0.log.old', 'boot.omsg', 'boot.log-20240604.xz'):
+            self.assertTrue(ml.is_rotated('/x/' + name), name)
+        for name in ('messages.txt', 'messages', 'messages.txt.gz', 'messages-mixed.txt',
+                     'messages_localwarn.txt', 'boot.txt', 'boot.msg', 'Xorg.0.log',
+                     'warn', 'localmessages', 'messages-202401150.txt'):
+            self.assertFalse(ml.is_rotated('/x/' + name), name)
 
     def test_directory(self):
         files = ml.collect_files([TESTDATA])
@@ -767,10 +797,15 @@ class TestMain(GparMixin, unittest.TestCase):
         self.assertEqual(self.main('-t', '3600', data('messages.txt')), 0)
 
     def test_directory(self):
-        # messages-20230301.txt cannot be validated without -y
+        self.assertEqual(self.main(TESTDATA), 1)
+        # rotated messages-20230301.txt cannot be validated without -y
         with self.assertLogs(ml.log, 'ERROR'):
-            self.assertEqual(self.main(TESTDATA), 2)
-        self.assertEqual(self.main('-y', '2024', TESTDATA), 1)
+            self.assertEqual(self.main('-R', TESTDATA), 2)
+        self.assertEqual(self.main('--rotated', '-y', '2024', TESTDATA), 1)
+
+    def test_explicit_rotated_file(self):
+        # files given explicitly are always checked
+        self.assertEqual(self.main(data('messages-20240103.txt')), 1)
 
     def test_unreadable(self):
         with self.assertLogs(ml.log, 'ERROR'):

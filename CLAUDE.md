@@ -51,10 +51,14 @@ timestamp is earlier than its reference timestamp.
     exists or the derived year gives Feb 29 in a non-leap year. With `-y`,
     such a line is skipped with a warning.
 - Lines without a timestamp (continuation lines) are skipped.
+- Rotated logs (`is_rotated()`, `ROTATED_RE` on the name without `.gz`/`.xz`:
+  `-yyyymmdd[.txt|.log]`, `.N`, `.old`, `boot.omsg`) are only included in
+  directory searches (both modes, also `-a` extras and `-r`) with `-R`.
+  Files and globs given on the command line are always checked.
 - Live system (`-L`): directories are searched for `LIVE_PATTERNS`
   (`messages`, `messages-*`, `warn`, `warn-*`, `localmessages`,
   `localmessages-*`, `boot.msg`, `boot.omsg`) instead of `DIR_PATTERNS`,
-  `path` defaults to `LIVE_DIR` (`/var/log`). `-a` / `-r` work as usual.
+  `path` defaults to `LIVE_DIR` (`/var/log`). `-a` / `-r` / `-R` work as usual.
   These files have no `#==[` headers, so they are processed completely.
   Only with `-L` the file mtime is a (last resort) year source. Permission
   errors keep exit code 2, with the hint `(run as root?)`.
@@ -88,7 +92,7 @@ timestamp is earlier than its reference timestamp.
 ## Usage
 
 ```
-./monotonic_logs.py [-hVvaLmprs][-t secs][-y year][-l log] path...
+./monotonic_logs.py [-hVvaLmpRrs][-t secs][-y year][-l log] path...
   -h, --help            usage
   -V, --version         print version and exit
   -v, --verbose         verbose (cumulative: -v warning, -vv info, -vvv debug)
@@ -99,6 +103,7 @@ timestamp is earlier than its reference timestamp.
                         defaults to /var/log
   -m, --max             compare against highest timestamp seen so far
   -p, --prev            print the reference line before each hit
+  -R, --rotated         include rotated logs in directory searches
   -r, --recursive       search directories recursively (os.walk, sorted,
                         symlinked directories not followed)
   -s, --summary         print only the largest backward step per file,
@@ -196,7 +201,8 @@ The script follows the author's standard skeleton. Keep it intact:
 Done: synthetic test data, unit tests, Python 3.6 verification (3.6.15),
 syslog year derivation (0.2), option `-y` (0.3), boot.txt sections (0.4), compressed input (0.5), summary option `-s` (0.6), option `-a` (0.7), cached tzinfo in `parse_iso()` (0.8, ~30% faster), journalctl `--output`
 sections, quiet zero lines, cumulated delta in `-s` (0.9), option `-r`
-(0.10), option `-L` for live systems and time since boot timestamps (0.11).
+(0.10), option `-L` for live systems and time since boot timestamps (0.11),
+option `-R` for rotated logs (0.12).
 
 1. Option `-j` (discuss first): check the systemd journal of a live system
    via `journalctl --no-pager -o short-iso-precise` (subprocess, stdlib),

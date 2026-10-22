@@ -4,7 +4,7 @@ Synopsis:
 Check SUSE supportconfig messages*.txt and boot.txt files for non-monotonic
 timestamps.
 
-Usage: %(appname)s [-hVvaLmprs][-t secs][-y year][-l log] path...
+Usage: %(appname)s [-hVvaLmpRrs][-t secs][-y year][-l log] path...
        -h, --help           this message
        -V, --version        print version and exit
        -v, --verbose        verbose mode (cumulative)
@@ -12,11 +12,14 @@ Usage: %(appname)s [-hVvaLmprs][-t secs][-y year][-l log] path...
        -a, --all            search directories for all files with logs, and
                             check all sections with logs (see Notes)
        -L, --live           search directories of a live system: messages,
-                            warn, localmessages (and rotated), boot.msg,
-                            boot.omsg; path defaults to /var/log
+                            warn, localmessages, boot.msg (with -R also
+                            rotated, boot.omsg); path defaults to /var/log
        -m, --max            compare against the highest timestamp seen so far
                             instead of the previous line
        -p, --prev           print the reference line before each hit
+       -R, --rotated        include rotated logs in directory searches
+                            (e.g. messages-yyyymmdd.txt, messages-*.xz,
+                            dnf.log.1, Xorg.0.log.old, boot.omsg)
        -r, --recursive      search directories recursively (symlinked
                             directories are not followed)
        -s, --summary        print only the largest backward step per file,
@@ -28,7 +31,8 @@ Usage: %(appname)s [-hVvaLmprs][-t secs][-y year][-l log] path...
        path may be a file, a glob pattern, or a directory
        (directories are searched for messages*.txt and boot.txt, and
        messages*.gz, messages*.xz, boot.txt.gz, boot.txt.xz; glob patterns
-       may match directories, too)
+       may match directories, too; rotated logs only with -R, files given
+       explicitly are always checked)
 
 Description:
 Files with supportconfig "#==[" headers are checked in these sections:
@@ -105,7 +109,7 @@ License:
 # vim:set et ts=8 sw=4:
 #
 
-__version__ = '0.11'
+__version__ = '0.12'
 __author__ = 'Hans-Peter Jansen <hpj@urpla.net>'
 __license__ = 'GNU GPL v2 - see http://www.gnu.org/licenses/gpl2.txt for details'
 
@@ -142,6 +146,7 @@ class gpar:
     all_files = False
     recursive = False
     live = False
+    rotated = False
     year = None
 
 
@@ -195,6 +200,9 @@ DIR_PATTERNS = ('messages*.txt', 'messages*.gz', 'messages*.xz',
 LIVE_PATTERNS = ('messages', 'messages-*', 'warn', 'warn-*',
                  'localmessages', 'localmessages-*', 'boot.msg', 'boot.omsg')
 LIVE_DIR = '/var/log'
+# rotated log files (after stripping .gz/.xz): messages-20240115.txt,
+# messages-20240115, zypper.log-20240115, dnf.log.1, Xorg.0.log.old, boot.omsg
+ROTATED_RE = re.compile(r'(?:-(?:19|20)\d{6}(?:\.txt|\.log)?|\.\d+|\.old|^boot\.omsg)$')
 
 # minimum number of consecutive timestamped lines of a log (option -a)
 MIN_RUN = 5
@@ -551,8 +559,17 @@ def check_section(path, lines):
     return hits
 
 
+def is_rotated(path):
+    """True, if path is a rotated log file by its name"""
+    name, ext = os.path.splitext(os.path.basename(path))
+    if ext not in OPENERS:
+        name += ext
+    return bool(ROTATED_RE.search(name))
+
+
 def dir_files(dirname):
-    """Return the sorted log files of one directory"""
+    """Return the sorted log files of one directory, rotated ones only
+    with option -R"""
     found = set()
     for pattern in LIVE_PATTERNS if gpar.live else DIR_PATTERNS:
         found.update(path for path in glob.glob(os.path.join(dirname, pattern))
@@ -560,8 +577,11 @@ def dir_files(dirname):
     if gpar.all_files:
         for name in os.listdir(dirname):
             path = os.path.join(dirname, name)
-            if path not in found and os.path.isfile(path) and is_log_file(path):
+            if path not in found and os.path.isfile(path) and \
+                    (gpar.rotated or not is_rotated(path)) and is_log_file(path):
                 found.add(path)
+    if not gpar.rotated:
+        found = set(path for path in found if not is_rotated(path))
     return sorted(found)
 
 
@@ -623,8 +643,8 @@ def main(argv = None):
         argv = sys.argv[1:]
 
     try:
-        optlist, args = getopt.getopt(argv, 'hVvl:aLmprst:y:',
-            ('help', 'version', 'verbose', 'logfile=', 'all', 'live',
+        optlist, args = getopt.getopt(argv, 'hVvl:aLmpRrst:y:',
+            ('help', 'version', 'verbose', 'logfile=', 'all', 'rotated', 'live',
              'max', 'prev', 'recursive', 'summary', 'threshold=', 'year=')
         )
     except getopt.error as msg:
@@ -642,6 +662,8 @@ def main(argv = None):
             gpar.logfile = par
         elif opt in ('-a', '--all'):
             gpar.all_files = True
+        elif opt in ('-R', '--rotated'):
+            gpar.rotated = True
         elif opt in ('-L', '--live'):
             gpar.live = True
         elif opt in ('-r', '--recursive'):
