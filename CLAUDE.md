@@ -81,12 +81,16 @@ timestamp is earlier than its reference timestamp.
   (cumulated delta: sum of all backward steps of the file). With `-p` the
   reference line is printed before each printed step, followed by an empty
   line.
-- stderr: per file summary (`0 backward steps` lines only with `-v`), the
-  total (always), and warnings
-  (`<file>:<lineno>: warning: ...`) if a derived syslog year is inconsistent
-  with a full timestamp (that year is used) or the file/directory name date, or
-  (with `-y`) gives Feb 29 in a non-leap year (line skipped). Warnings don't
-  change the exit code.
+- stderr: per file summary of files with backward steps, the total (always),
+  and warnings.
+  - `-v` adds `, <checked> lines checked` (lines with a valid timestamp in
+    checked sections) to both, and `in <n> files` to the total; `-vv` lists
+    every checked file and shows `<checked> of <lines> lines checked`
+    (`fmt_checked()`; files that failed are not counted).
+  - Warnings `<file>:<lineno>: warning: ...` if a derived syslog year is
+    inconsistent with a full timestamp (that year is used) or the
+    file/directory name date, or (with `-y`) gives Feb 29 in a non-leap year
+    (line skipped). Warnings don't change the exit code.
 - Exit codes: 0 = no backward steps, 1 = backward steps found,
   2 = a file could not be read (or decompressed) or its year could not be
   validated,
@@ -101,7 +105,8 @@ timestamp is earlier than its reference timestamp.
 ./monotonic_logs.py [-hVvaLmpRrs][-t secs][-y year][-l log] path...
   -h, --help            usage
   -V, --version         print version and exit
-  -v, --verbose         verbose (cumulative: -v warning, -vv info, -vvv debug)
+  -v, --verbose         verbose (cumulative: -v warning + checked lines,
+                        -vv info + all files with lines, -vvv debug)
   -l, --logfile=fname   log to this file (default and `-`: stderr)
   -a, --all             also search directories for all other files with
                         logs, and check all sections with logs
@@ -133,7 +138,8 @@ supported timestamp (`is_log_file()`, a pre-scan with the combined
 
 `main()` (getopt → `gpar`) → `process()` → `collect_files()` → per file
 `check_file()` → `log_sections()` (section detection, reads whole file) →
-per section `check_section()`.
+per section `check_section()`. `check_file()` returns
+`(backward steps, checked lines, lines)`, `check_section()` `(hits, checked)`.
 
 - `check_section()` works in two passes: first it collects entries
   `[no, line, ts, fields, coarse]` (`ISO_RE`, then `MONO_RE`, then `DMESG_RE`, then `BSD_RE`; syslog
@@ -212,7 +218,7 @@ syslog year derivation (0.2), option `-y` (0.3), boot.txt sections (0.4), compre
 sections, quiet zero lines, cumulated delta in `-s` (0.9), option `-r`
 (0.10), option `-L` for live systems and time since boot timestamps (0.11),
 option `-R` for rotated logs (0.12), default threshold 0.25 s plus
-resolution of whole seconds (0.13).
+resolution of whole seconds (0.13), checked lines with `-v` / `-vv` (0.14).
 
 1. Option `-j` (discuss first): check the systemd journal of a live system
    via `journalctl --no-pager -o short-iso-precise` (subprocess, stdlib),

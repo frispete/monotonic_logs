@@ -62,7 +62,7 @@ class CheckMixin(GparMixin):
         path = name if os.path.isabs(name) else data(name)
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            count = ml.check_file(path)
+            count = ml.check_file(path)[0]
         self.warnings = err.getvalue().splitlines()
         hits = []
         for line in out.getvalue().splitlines():
@@ -223,7 +223,7 @@ class TestCheckFile(CheckMixin, unittest.TestCase):
             setattr(gpar, k, v)
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
-            count = ml.check_file(data(name))
+            count = ml.check_file(data(name))[0]
         return count, out.getvalue().split('\n')[:-1]
 
     def test_summary(self):
@@ -845,11 +845,35 @@ class TestMain(GparMixin, unittest.TestCase):
         self.assertEqual(self.stderr(data('messages-monotonic.txt')),
                          ['total: 0 backward steps'])
 
-    def test_verbose_without_steps(self):
+    def test_verbose_checked_lines(self):
+        files = (data('messages-monotonic.txt'), data('messages.txt'))
+        # -v: checked lines, files without steps are not listed
         with self.assertLogs(ml.log, 'INFO'):
-            lines = self.stderr('-v', data('messages-monotonic.txt'))
-        self.assertEqual(lines, ['%s: 0 backward steps' % data('messages-monotonic.txt'),
-                                 'total: 0 backward steps'])
+            lines = self.stderr('-v', *files)
+        self.assertEqual(lines, ['%s: 2 backward steps, 7 lines checked' % files[1],
+                                 'total: 2 backward steps, 10 lines checked in 2 files'])
+
+    def test_very_verbose_all_files(self):
+        files = (data('messages-monotonic.txt'), data('messages.txt'), data(BOOT))
+        # -vv: every file with its number of lines (boot.txt: 4 sections)
+        with self.assertLogs(ml.log, 'INFO'):
+            lines = self.stderr('-vv', *files)
+        self.assertEqual(lines, ['%s: 0 backward steps, 3 of 3 lines checked' % files[0],
+                                 '%s: 2 backward steps, 7 of 20 lines checked' % files[1],
+                                 '%s: 3 backward steps, 14 of 46 lines checked' % files[2],
+                                 'total: 5 backward steps, 24 of 69 lines checked in 3 files'])
+
+    def test_verbose_skips_failed_files(self):
+        with self.assertLogs(ml.log, 'ERROR'):
+            lines = self.stderr('-vv', data('messages.txt'), '/nonexistent/messages.txt')
+        self.assertEqual(lines[-1], 'total: 2 backward steps, 7 of 20 lines checked in 1 files')
+
+    def test_check_file_counts(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ml.check_file(data('messages.txt')), (2, 7, 20))
+            self.assertEqual(ml.check_file(data('messages-empty.txt')), (0, 0, 0))
+            # invalid dates are not counted as checked
+            self.assertEqual(ml.check_file(data('messages-20240115.txt')), (2, 6, 7))
 
     def test_summary_option(self):
         self.assertEqual(self.main('-s', data('messages.txt')), 1)

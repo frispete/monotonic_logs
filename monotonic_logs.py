@@ -7,7 +7,9 @@ timestamps.
 Usage: %(appname)s [-hVvaLmpRrs][-t secs][-y year][-l log] path...
        -h, --help           this message
        -V, --version        print version and exit
-       -v, --verbose        verbose mode (cumulative)
+       -v, --verbose        verbose mode (cumulative): -v adds the number of
+                            checked lines, -vv lists every checked file
+                            with its number of lines
        -l, --logfile=fname  log to this file
        -a, --all            search directories for all files with logs, and
                             check all sections with logs (see Notes)
@@ -72,8 +74,9 @@ With -s, only the largest step of each file with backward steps:
     <file>:<lineno>  <negative delta>  <number of backward steps>
         <cumulated negative delta>  <log line>
 
-A per file summary (files without backward steps only in verbose mode)
-and the total are printed to stderr.
+A per file summary of files with backward steps and the total are printed
+to stderr. With -v, the number of checked lines (with timestamp) is added,
+with -vv, every checked file is listed, with its number of lines.
 Exit code: 0 = no backward steps, 1 = backward steps found,
 2 = a file could not be read (or decompressed) or its year could not be
 validated,
@@ -111,7 +114,7 @@ License:
 # vim:set et ts=8 sw=4:
 #
 
-__version__ = '0.13'
+__version__ = '0.14'
 __author__ = 'Hans-Peter Jansen <hpj@urpla.net>'
 __license__ = 'GNU GPL v2 - see http://www.gnu.org/licenses/gpl2.txt for details'
 
@@ -320,7 +323,13 @@ def is_log_file(path):
         return False
 
 
-def log_sections(path):
+def read_lines(path):
+    """Return the lines of a possibly compressed file"""
+    with open_text(path) as fh:
+        return fh.read().splitlines()
+
+
+def log_sections(path, lines = None):
     """Return the log sections of a file as lists of (lineno, line)
 
     A file without any "#==[" header is a single section. Otherwise, only
@@ -328,8 +337,8 @@ def log_sections(path):
     all other sections with a run of timestamped lines. Each section ends at
     the next "#==[" header or the end of file.
     """
-    with open_text(path) as fh:
-        lines = fh.read().splitlines()
+    if lines is None:
+        lines = read_lines(path)
 
     if not any(SECTION_RE.match(line) for line in lines):
         return [list(enumerate(lines, 1))]
@@ -485,13 +494,18 @@ def print_hit(path, hit, extra = ()):
 
 
 def check_file(path):
-    """Report backward timestamp steps in one file, return their count"""
-    sections = log_sections(path)
+    """Report backward timestamp steps in one file, return the number of
+    (backward steps, checked lines with timestamp, lines)"""
+    lines = read_lines(path)
+    sections = log_sections(path, lines)
     if not sections:
         log.warning('%s: no log section found', path)
     hits = []
+    checked = 0
     for section in sections:
-        hits.extend(check_section(path, section))
+        section_hits, section_checked = check_section(path, section)
+        hits.extend(section_hits)
+        checked += section_checked
 
     if gpar.summary:
         if hits:
@@ -502,12 +516,13 @@ def check_file(path):
     else:
         for hit in hits:
             print_hit(path, hit)
-    return len(hits)
+    return len(hits), checked, len(lines)
 
 
 def check_section(path, lines):
     """Return the backward timestamp steps in one log section as list of
-    (lineno, delta, line, reference lineno, reference line)"""
+    (lineno, delta, line, reference lineno, reference line), and the number
+    of checked lines with timestamp"""
     entries = []
     for no, line in lines:
         m = ISO_RE.match(line)
@@ -568,7 +583,7 @@ def check_section(path, lines):
                     continue
         prev_ts, prev_line, prev_no, prev_coarse = ts, line, no, coarse
 
-    return hits
+    return hits, sum(1 for e in entries if e[2] is not None)
 
 
 def is_rotated(path):
@@ -615,6 +630,15 @@ def collect_files(args):
     return files
 
 
+def fmt_checked(checked, nlines, suffix = ''):
+    """Format the number of checked lines (-v) and lines (-vv)"""
+    if gpar.loglevel > logging.WARNING:
+        return ''
+    if gpar.loglevel > logging.INFO:
+        return ', %d lines checked%s' % (checked, suffix)
+    return ', %d of %d lines checked%s' % (checked, nlines, suffix)
+
+
 def process(args):
     ret = 0
     log.info('started with pid %s in %s', os.getpid(), gpar.appdir)
@@ -623,11 +647,11 @@ def process(args):
     if not files:
         exit(1, 'no files found')
 
-    total = 0
+    total = total_checked = total_lines = nfiles = 0
     for path in files:
         log.info('processing %s', path)
         try:
-            count = check_file(path)
+            count, checked, nlines = check_file(path)
         except (OSError, EOFError, lzma.LZMAError) as e:
             # EOFError, LZMAError: truncated or corrupt compressed file
             log.error('%s: %s%s', path, e,
@@ -639,11 +663,16 @@ def process(args):
                       'use -y to set the starting year', path, e)
             ret = 2
             continue
-        if count or gpar.loglevel < logging.ERROR:
-            stderr('%s: %d backward steps' % (path, count))
+        # -v: checked lines, -vv: all files and their number of lines
+        if count or gpar.loglevel <= logging.INFO:
+            stderr('%s: %d backward steps%s' % (path, count, fmt_checked(checked, nlines)))
         total += count
+        total_checked += checked
+        total_lines += nlines
+        nfiles += 1
 
-    stderr('total: %d backward steps' % total)
+    stderr('total: %d backward steps%s' % (
+           total, fmt_checked(total_checked, total_lines, ' in %d files' % nfiles)))
     if total and not ret:
         ret = 1
     return ret
